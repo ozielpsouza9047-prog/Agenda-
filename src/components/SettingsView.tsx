@@ -18,6 +18,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ debts, onRestoreDebt
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 
+  const [notificationsEnabled, setNotificationsEnabled] = useState<boolean>(() => {
+    return localStorage.getItem('divida_zero_notif_enabled') !== 'false';
+  });
+
   useEffect(() => {
     const savedDate = localStorage.getItem('divida_zero_last_backup');
     if (savedDate) setLastBackupDate(savedDate);
@@ -36,6 +40,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ debts, onRestoreDebt
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
     };
   }, []);
+
+  const handleToggleNotifications = (val: boolean) => {
+    setNotificationsEnabled(val);
+    localStorage.setItem('divida_zero_notif_enabled', val.toString());
+    if (val && 'Notification' in window) {
+      Notification.requestPermission();
+    }
+  };
 
   const handleExportJSON = () => {
     const backupPayload = {
@@ -106,7 +118,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ debts, onRestoreDebt
     if (mode === 'replace') {
       onRestoreDebts(previewData);
     } else {
-      // Merge avoiding duplicates by id
       const existingIds = new Set(debts.map(d => d.id));
       const newItems = previewData.filter(d => !existingIds.has(d.id));
       onRestoreDebts([...debts, ...newItems]);
@@ -133,10 +144,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ debts, onRestoreDebt
     <div className="space-y-6 pb-20 md:pb-8 max-w-4xl">
       <div>
         <h2 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
-          Configurações, Backup & Restauração
+          Configurações, Backup & Notificações
         </h2>
         <p className="text-xs opacity-60">
-          Gerencie seus backups em JSON/CSV, restauração de dados e preferências do sistema
+          Gerencie notificações de vencimento (7d, 3d, 1d, hoje), backups e preferências
         </p>
       </div>
 
@@ -155,6 +166,35 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ debts, onRestoreDebt
       )}
 
       <div className="space-y-4">
+        {/* Notifications Settings */}
+        <div className={`p-6 rounded-2xl border flex items-center justify-between ${
+          isDark ? 'bg-neutral-900/80 border-neutral-800' : 'bg-white border-slate-200'
+        }`}>
+          <div className="flex items-start gap-4">
+            <div className="p-3 rounded-xl bg-purple-600/20 text-purple-400 shrink-0">
+              <Bell className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                Notificações de Vencimento
+              </h3>
+              <p className="text-xs opacity-60 mt-0.5 max-w-md">
+                Alertas automáticos para 7 dias, 3 dias, 1 dia antes, no dia do pagamento e contas atrasadas.
+              </p>
+            </div>
+          </div>
+
+          <label className="relative inline-flex items-center cursor-pointer">
+            <input
+              type="checkbox"
+              checked={notificationsEnabled}
+              onChange={(e) => handleToggleNotifications(e.target.checked)}
+              className="sr-only peer"
+            />
+            <div className="w-11 h-6 bg-neutral-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:width-5 after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
+          </label>
+        </div>
+
         {/* Backup & Export Section */}
         <div className={`p-6 rounded-2xl border ${
           isDark ? 'bg-neutral-900/80 border-neutral-800' : 'bg-white border-slate-200'

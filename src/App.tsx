@@ -6,6 +6,8 @@ import { DashboardView } from './components/DashboardView';
 import { DebtsView } from './components/DebtsView';
 import { CalendarView } from './components/CalendarView';
 import { ReportsView } from './components/ReportsView';
+import { PayoffPlannerView } from './components/PayoffPlannerView';
+import { GoalsView } from './components/GoalsView';
 import { AIAssistantView } from './components/AIAssistantView';
 import { SettingsView } from './components/SettingsView';
 import { AddDebtModal } from './components/AddDebtModal';
@@ -14,7 +16,8 @@ import { ImportBoletoModal } from './components/ImportBoletoModal';
 import { ActiveTab, DebtItem, FinancialSummary } from './types';
 import { initialDebts, initialSummary } from './mockData';
 import { calculateFinancialSummary } from './utils/calculations';
-import { X, ShieldAlert, LayoutDashboard, Wallet, Calendar, BarChart3, Sparkles, Settings, Calculator } from 'lucide-react';
+import { checkAndTriggerNotifications } from './utils/notifications';
+import { X, ShieldAlert, LayoutDashboard, Wallet, Calendar, BarChart3, Target, Trophy, Sparkles, Settings, Calculator } from 'lucide-react';
 
 export default function App() {
   const [isDark, setIsDark] = useState<boolean>(true);
@@ -41,12 +44,15 @@ export default function App() {
   const [editingDebt, setEditingDebt] = useState<DebtItem | null>(null);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
 
-  // Automatic recalculation hook whenever debts change
+  // Automatic recalculation hook and notifications check whenever debts change
   useEffect(() => {
     localStorage.setItem('divida_zero_debts', JSON.stringify(debts));
     const result = calculateFinancialSummary(debts);
     setSummary(result.summary);
     setMemoryItems(result.memory);
+
+    const notifEnabled = localStorage.getItem('divida_zero_notif_enabled') !== 'false';
+    checkAndTriggerNotifications(debts, notifEnabled);
   }, [debts]);
 
   // Handle saving (add or update) a debt
@@ -157,6 +163,14 @@ export default function App() {
             <ReportsView debts={debts} isDark={isDark} />
           )}
 
+          {activeTab === 'planner' && (
+            <PayoffPlannerView debts={debts} isDark={isDark} />
+          )}
+
+          {activeTab === 'goals' && (
+            <GoalsView debts={debts} isDark={isDark} />
+          )}
+
           {activeTab === 'ai_advisor' && (
             <AIAssistantView debts={debts} isDark={isDark} />
           )}
@@ -200,6 +214,8 @@ export default function App() {
                 { id: 'debts' as ActiveTab, label: 'Minhas Dívidas', icon: Wallet },
                 { id: 'forecast' as ActiveTab, label: 'Calendário & Fluxo', icon: Calendar },
                 { id: 'reports' as ActiveTab, label: 'Relatórios', icon: BarChart3 },
+                { id: 'planner' as ActiveTab, label: 'Planejador', icon: Target },
+                { id: 'goals' as ActiveTab, label: 'Minhas Metas', icon: Trophy },
                 { id: 'ai_advisor' as ActiveTab, label: 'IA Dívida Zero', icon: Sparkles },
                 { id: 'settings' as ActiveTab, label: 'Configurações', icon: Settings },
               ].map(item => {

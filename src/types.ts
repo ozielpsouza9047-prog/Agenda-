@@ -24,4 +24,4 @@ export interface FinancialSummary {
   upcomingInstallmentsCount: number;
 }
 
-export type ActiveTab = 'dashboard' | 'debts' | 'forecast' | 'reports' | 'ai_advisor' | 'settings';
+export type ActiveTab = 'dashboard' | 'debts' | 'forecast' | 'reports' | 'planner' | 'goals' | 'ai_advisor' | 'settings';

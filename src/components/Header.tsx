@@ -25,6 +25,8 @@ export const Header: React.FC<HeaderProps> = ({
       case 'debts': return 'Gerenciamento de Dívidas';
       case 'forecast': return 'Previsões & Fluxo de Caixa';
       case 'reports': return 'Relatórios Financeiros & Análises';
+      case 'planner': return 'Planejador de Quitação Estratégica';
+      case 'goals': return 'Minhas Metas de Quitação';
       case 'ai_advisor': return 'Consultor IA Dívida Zero';
       case 'settings': return 'Configurações da Conta';
     }
