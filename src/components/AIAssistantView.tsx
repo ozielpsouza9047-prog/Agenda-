@@ -34,14 +34,24 @@ export const AIAssistantView: React.FC<AIAssistantViewProps> = ({ debts, isDark 
     setIsTyping(true);
 
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
+
       const res = await fetch('/api/ai-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           prompt: query,
           debtsContext: debts
         })
       });
+
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        throw new Error(`Status ${res.status}`);
+      }
 
       const data = await res.json();
       setIsTyping(false);
@@ -49,11 +59,11 @@ export const AIAssistantView: React.FC<AIAssistantViewProps> = ({ debts, isDark 
       if (data.reply) {
         setMessages(prev => [...prev, { sender: 'ai', text: data.reply }]);
       } else {
-        setMessages(prev => [...prev, { sender: 'ai', text: 'Não foi possível obter resposta no momento. Tente novamente.' }]);
+        throw new Error('Resposta vazia');
       }
     } catch (err) {
       setIsTyping(false);
-      // Fallback local smart response if server offline
+      // Fallback local smart response if server offline or timeout
       let fallbackReply = 'Analisando suas dívidas com base nos cálculos do sistema...';
       const qLower = query.toLowerCase();
 
@@ -63,13 +73,31 @@ export const AIAssistantView: React.FC<AIAssistantViewProps> = ({ debts, isDark 
       } else if (qLower.includes('mês') || qLower.includes('mes')) {
         const monthSum = debts.filter(d => d.status !== 'quitado').reduce((acc, d) => acc + d.monthlyPayment, 0);
         fallbackReply = `O valor previsto de parcelas para este mês é de R$ ${monthSum.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}.`;
-      } else if (qLower.includes('atrasada')) {
+      } else if (qLower.includes('atrasada') || qLower.includes('atraso')) {
         const overdue = debts.filter(d => d.status === 'atrasado');
         fallbackReply = overdue.length > 0
           ? `Você possui ${overdue.length} conta(s) atrasada(s): ${overdue.map(d => d.title).join(', ')}. Recomendo quitação prioritária.`
           : 'Parabéns! Você não possui nenhuma conta atrasada no momento.';
+      } else if (qLower.includes('7 dias') || qLower.includes('vencem') || qLower.includes('próximo') || qLower.includes('proximo')) {
+        const today = new Date();
+        const in7Days = new Date();
+        in7Days.setDate(today.getDate() + 7);
+        const upcoming7 = debts.filter(d => {
+          if (d.status === 'quitado') return false;
+          const due = new Date(d.dueDate);
+          return due >= today && due <= in7Days;
+        });
+        fallbackReply = upcoming7.length > 0
+          ? `Nos próximos 7 dias vencem ${upcoming7.length} conta(s): ${upcoming7.map(d => `${d.title} (R$ ${d.monthlyPayment.toFixed(2)})`).join(', ')}.`
+          : 'Não há contas com vencimento programado para os próximos 7 dias.';
+      } else if (qLower.includes('adicionar') || qLower.includes('parcela')) {
+        const currentMonth = debts.filter(d => d.status !== 'quitado').reduce((acc, d) => acc + d.monthlyPayment, 0);
+        const matchNumber = query.match(/(\d+([.,]\d+)?)/);
+        const extraVal = matchNumber ? parseFloat(matchNumber[1].replace(',', '.')) : 300;
+        const newTotal = currentMonth + extraVal;
+        fallbackReply = `Ao adicionar uma nova parcela de R$ ${extraVal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}, seu pagamento mensal estimado passará de R$ ${currentMonth.toLocaleString('pt-BR', { minimumFractionDigits: 2 })} para R$ ${newTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}.`;
       } else {
-        fallbackReply = 'Com base nos seus dados financeiros reais, essa operação requer atenção ao seu fluxo de caixa mensal. Deseja que eu simule a quitação?';
+        fallbackReply = 'Com base nos seus dados financeiros reais cadastrados, essa operação requer atenção ao seu fluxo de caixa mensal. Você pode simular cenários na aba Planejador.';
       }
 
       setMessages(prev => [...prev, { sender: 'ai', text: fallbackReply }]);

@@ -1,15 +1,30 @@
 import React from 'react';
-import { Wallet, Calendar, AlertTriangle, Clock, TrendingUp, ArrowUpRight } from 'lucide-react';
+import { Wallet, Calendar, AlertTriangle, Clock, TrendingUp } from 'lucide-react';
 import { FinancialSummary } from '../types';
 
 interface MetricCardsProps {
   summary: FinancialSummary;
   isDark: boolean;
+  hideValues?: boolean;
 }
 
-export const MetricCards: React.FC<MetricCardsProps> = ({ summary, isDark }) => {
+export const MetricCards: React.FC<MetricCardsProps> = ({ summary, isDark, hideValues = false }) => {
   const formatCurrency = (val: number) => {
+    if (hideValues) return '••••••';
     return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val);
+  };
+
+  const getDaysDiffBadge = (dateStr: string) => {
+    if (!dateStr || dateStr === 'N/A') return 'Sem data';
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const target = new Date(dateStr);
+    target.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+    if (diffDays < 0) return `${Math.abs(diffDays)}d atrasado`;
+    if (diffDays === 0) return 'Vence hoje';
+    if (diffDays === 1) return 'Amanhã';
+    return `Em ${diffDays} dias`;
   };
 
   const cards = [
@@ -20,17 +35,17 @@ export const MetricCards: React.FC<MetricCardsProps> = ({ summary, isDark }) => 
       icon: Wallet,
       color: 'from-purple-600 to-indigo-600',
       textColor: 'text-purple-400',
-      badge: '-4.2% este mês',
-      badgeColor: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+      badge: summary.totalDebts === 0 ? 'Dívida Zero' : 'Em amortização',
+      badgeColor: summary.totalDebts === 0 ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : 'text-purple-400 bg-purple-500/10 border-purple-500/20'
     },
     {
       title: 'Valor Previsto para o Mês',
       value: formatCurrency(summary.projectedMonthAmount),
-      subtitle: 'Vencimentos em Outubro/2026',
+      subtitle: 'Parcelas ativas no período',
       icon: TrendingUp,
       color: 'from-blue-600 to-cyan-600',
       textColor: 'text-cyan-400',
-      badge: '6 parcelas',
+      badge: `${summary.upcomingInstallmentsCount} ${summary.upcomingInstallmentsCount === 1 ? 'parcela' : 'parcelas'}`,
       badgeColor: 'text-cyan-400 bg-cyan-500/10 border-cyan-500/20'
     },
     {
@@ -40,8 +55,8 @@ export const MetricCards: React.FC<MetricCardsProps> = ({ summary, isDark }) => 
       icon: Calendar,
       color: 'from-amber-500 to-orange-600',
       textColor: 'text-amber-400',
-      badge: 'Em 2 dias',
-      badgeColor: 'text-amber-400 bg-amber-500/10 border-amber-500/20'
+      badge: getDaysDiffBadge(summary.nextDueDate),
+      badgeColor: summary.nextDueDate !== 'N/A' && new Date(summary.nextDueDate) < new Date() ? 'text-rose-400 bg-rose-500/10 border-rose-500/20' : 'text-amber-400 bg-amber-500/10 border-amber-500/20'
     },
     {
       title: 'Contas Atrasadas',
@@ -50,12 +65,12 @@ export const MetricCards: React.FC<MetricCardsProps> = ({ summary, isDark }) => 
       icon: AlertTriangle,
       color: 'from-rose-600 to-red-700',
       textColor: 'text-rose-400',
-      badge: 'Atenção redobrada',
-      badgeColor: 'text-rose-400 bg-rose-500/10 border-rose-500/20'
+      badge: summary.overdueCount > 0 ? 'Ação prioritária' : 'Em dia',
+      badgeColor: summary.overdueCount > 0 ? 'text-rose-400 bg-rose-500/10 border-rose-500/20' : 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
     },
     {
       title: 'Próximas Parcelas',
-      value: `${summary.upcomingInstallmentsCount} ativas`,
+      value: hideValues ? '•••' : `${summary.upcomingInstallmentsCount} ativas`,
       subtitle: 'Fluxo programado próximo trimestre',
       icon: Clock,
       color: 'from-purple-500 to-pink-600',

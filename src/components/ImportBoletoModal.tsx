@@ -35,11 +35,20 @@ export const ImportBoletoModal: React.FC<ImportBoletoModalProps> = ({
       return;
     }
 
+    if (file.size > 10 * 1024 * 1024) {
+      setErrorMsg('O arquivo excede o limite máximo de segurança de 10MB.');
+      return;
+    }
+
     setFileName(file.name);
     setErrorMsg('');
     setIsLoading(true);
 
     const reader = new FileReader();
+    reader.onerror = () => {
+      setErrorMsg('Não foi possível ler o arquivo selecionado.');
+      setIsLoading(false);
+    };
     reader.onload = (event) => {
       setTimeout(() => {
         setIsLoading(false);
@@ -79,8 +88,14 @@ export const ImportBoletoModal: React.FC<ImportBoletoModalProps> = ({
 
         setExtractedData(mockParsedDebt);
 
-        // Check duplicate
-        const isDuplicate = existingDebts.some(d => d.title.toLowerCase() === mockParsedDebt.title.toLowerCase() && d.totalAmount === mockParsedDebt.totalAmount);
+        // Check duplicate with multiple composite criteria
+        const isDuplicate = existingDebts.some(d => {
+          const sameTitleAndAmount = d.title.toLowerCase() === mockParsedDebt.title.toLowerCase() && Math.abs(d.totalAmount - mockParsedDebt.totalAmount) < 0.01;
+          const sameCreditorAndDue = d.creditor.toLowerCase() === mockParsedDebt.creditor.toLowerCase() && d.dueDate === mockParsedDebt.dueDate && Math.abs(d.totalAmount - mockParsedDebt.totalAmount) < 0.01;
+          const sameBarcode = Boolean((d as any).barcode && mockParsedDebt.barcode && (d as any).barcode === mockParsedDebt.barcode);
+          return sameTitleAndAmount || sameCreditorAndDue || sameBarcode;
+        });
+
         if (isDuplicate) {
           setPendingDebt(mockParsedDebt);
           setStep('duplicate_warning');
@@ -98,6 +113,17 @@ export const ImportBoletoModal: React.FC<ImportBoletoModalProps> = ({
   };
 
   const handleConfirmImport = () => {
+    const todayStr = new Date().toISOString().split('T')[0];
+    const targetDueDate = extractedData.dueDate || '2026-11-10';
+    let computedStatus: DebtItem['status'] = 'em_dia';
+    if (targetDueDate < todayStr) {
+      computedStatus = 'atrasado';
+    } else {
+      const diffTime = new Date(targetDueDate).getTime() - new Date(todayStr).getTime();
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      computedStatus = diffDays <= 7 ? 'proximo_vencimento' : 'em_dia';
+    }
+
     const finalDebt: DebtItem = {
       id: extractedData.id || `debt-${Date.now()}`,
       title: extractedData.title || 'Boleto Importado',
@@ -106,8 +132,8 @@ export const ImportBoletoModal: React.FC<ImportBoletoModalProps> = ({
       totalAmount: extractedData.totalAmount || 100,
       remainingAmount: extractedData.remainingAmount || 100,
       monthlyPayment: extractedData.monthlyPayment || 100,
-      dueDate: extractedData.dueDate || '2026-11-10',
-      status: 'proximo_vencimento',
+      dueDate: targetDueDate,
+      status: computedStatus,
       installmentsTotal: extractedData.installmentsTotal || 1,
       installmentsPaid: extractedData.installmentsPaid || 0,
       interestRate: extractedData.interestRate || 2.0

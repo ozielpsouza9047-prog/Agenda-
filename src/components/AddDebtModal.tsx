@@ -69,22 +69,58 @@ export const AddDebtModal: React.FC<AddDebtModalProps> = ({
 
     const totalInst = parseInt(installmentsTotal) || 1;
     const paidInst = parseInt(installmentsPaid) || 0;
+
+    if (totalInst < 1 || totalInst > 480) {
+      setErrorMsg('O número total de parcelas deve estar entre 1 e 480.');
+      return;
+    }
+
+    if (paidInst < 0 || paidInst > totalInst) {
+      setErrorMsg('O número de parcelas pagas deve estar entre 0 e o total de parcelas.');
+      return;
+    }
+
     const monthly = parseFloat(monthlyPayment) || (total / totalInst);
-    const remaining = Math.max(0, total - (monthly * paidInst));
+    if (monthly <= 0) {
+      setErrorMsg('O valor da parcela deve ser maior que zero.');
+      return;
+    }
+
+    const rate = parseFloat(interestRate);
+    if (isNaN(rate) || rate < 0 || rate > 100) {
+      setErrorMsg('A taxa de juros mensal deve estar entre 0% e 100%.');
+      return;
+    }
+
+    const isQuitado = paidInst >= totalInst;
+    const remaining = isQuitado ? 0 : Math.max(0, total - (monthly * paidInst));
+    const effectiveDueDate = dueDate || new Date().toISOString().split('T')[0];
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    let computedStatus: DebtItem['status'] = 'em_dia';
+    if (isQuitado) {
+      computedStatus = 'quitado';
+    } else if (effectiveDueDate < todayStr) {
+      computedStatus = 'atrasado';
+    } else {
+      const diffTime = new Date(effectiveDueDate).getTime() - new Date(todayStr).getTime();
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      computedStatus = diffDays <= 7 ? 'proximo_vencimento' : 'em_dia';
+    }
 
     const debtItem: DebtItem = {
       id: editingDebt ? editingDebt.id : `debt-${Date.now()}`,
-      title,
-      creditor: creditor.trim() || 'Credor Padrão',
+      title: title.trim().slice(0, 100),
+      creditor: (creditor.trim() || 'Credor Padrão').slice(0, 100),
       category,
-      totalAmount: total,
-      remainingAmount: remaining,
-      monthlyPayment: monthly,
-      dueDate: dueDate || new Date().toISOString().split('T')[0],
-      status: paidInst >= totalInst ? 'quitado' : 'proximo_vencimento',
+      totalAmount: Math.round(total * 100) / 100,
+      remainingAmount: Math.round(remaining * 100) / 100,
+      monthlyPayment: Math.round(monthly * 100) / 100,
+      dueDate: effectiveDueDate,
+      status: computedStatus,
       installmentsTotal: totalInst,
       installmentsPaid: paidInst,
-      interestRate: parseFloat(interestRate) || 0
+      interestRate: Math.round(rate * 100) / 100
     };
 
     onSaveDebt(debtItem);

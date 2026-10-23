@@ -24,4 +24,25 @@ export interface FinancialSummary {
   upcomingInstallmentsCount: number;
 }
 
-export type ActiveTab = 'dashboard' | 'debts' | 'forecast' | 'reports' | 'planner' | 'goals' | 'ai_advisor' | 'settings';
+export interface UserProfile {
+  name: string;
+  email: string;
+  avatarUrl?: string;
+  currency: 'BRL' | 'USD' | 'EUR';
+  createdAt: string;
+  role: 'user';
+  hideValuesOnDashboard: boolean;
+  allowAiDataAnalysis: boolean;
+  biometricLock: boolean;
+  notificationPreferences: {
+    enabled: boolean;
+    notify7Days: boolean;
+    notify3Days: boolean;
+    notify1Day: boolean;
+    notifyDueDay: boolean;
+    notifyOverdue: boolean;
+    emailSummary: boolean;
+  };
+}
+
+export type ActiveTab = 'dashboard' | 'debts' | 'forecast' | 'reports' | 'planner' | 'goals' | 'ai_advisor' | 'profile' | 'settings';

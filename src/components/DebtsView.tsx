@@ -112,7 +112,8 @@ export const DebtsView: React.FC<DebtsViewProps> = ({
             { id: 'todos', label: 'Todas' },
             { id: 'atrasado', label: 'Atrasadas' },
             { id: 'proximo_vencimento', label: 'Próximas' },
-            { id: 'em_dia', label: 'Em Dia' }
+            { id: 'em_dia', label: 'Em Dia' },
+            { id: 'quitado', label: 'Quitadas' }
           ].map(tab => (
             <button
               key={tab.id}
@@ -183,9 +184,11 @@ export const DebtsView: React.FC<DebtsViewProps> = ({
                         ? 'bg-rose-500/10 text-rose-400 border-rose-500/20'
                         : debt.status === 'proximo_vencimento'
                         ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                        : debt.status === 'quitado'
+                        ? 'bg-purple-500/10 text-purple-400 border-purple-500/20'
                         : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                     }`}>
-                      {debt.status === 'atrasado' ? 'Atrasado' : debt.status === 'proximo_vencimento' ? 'Próximo' : 'Em Dia'}
+                      {debt.status === 'atrasado' ? 'Atrasado' : debt.status === 'proximo_vencimento' ? 'Próximo' : debt.status === 'quitado' ? 'Quitada' : 'Em Dia'}
                     </span>
                   </div>
 

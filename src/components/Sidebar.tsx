@@ -1,14 +1,31 @@
 import React from 'react';
-import { LayoutDashboard, Wallet, Calendar, BarChart3, Target, Trophy, Sparkles, Settings, ShieldAlert } from 'lucide-react';
-import { ActiveTab } from '../types';
+import {
+  LayoutDashboard,
+  Wallet,
+  Calendar,
+  BarChart3,
+  Target,
+  Trophy,
+  Sparkles,
+  Settings,
+  ShieldAlert,
+  User
+} from 'lucide-react';
+import { ActiveTab, UserProfile } from '../types';
 
 interface SidebarProps {
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
   isDark: boolean;
+  userProfile?: UserProfile;
 }
 
-export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, isDark }) => {
+export const Sidebar: React.FC<SidebarProps> = ({
+  activeTab,
+  setActiveTab,
+  isDark,
+  userProfile,
+}) => {
   const menuItems = [
     { id: 'dashboard' as ActiveTab, label: 'Visão Geral', icon: LayoutDashboard },
     { id: 'debts' as ActiveTab, label: 'Minhas Dívidas', icon: Wallet },
@@ -17,13 +34,26 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, isDar
     { id: 'planner' as ActiveTab, label: 'Planejador', icon: Target },
     { id: 'goals' as ActiveTab, label: 'Minhas Metas', icon: Trophy },
     { id: 'ai_advisor' as ActiveTab, label: 'IA Dívida Zero', icon: Sparkles, badge: 'IA' },
+    { id: 'profile' as ActiveTab, label: 'Meu Perfil', icon: User },
     { id: 'settings' as ActiveTab, label: 'Configurações', icon: Settings },
   ];
 
+  const getInitials = (n: string) => {
+    const parts = n.trim().split(' ');
+    if (parts.length >= 2) {
+      return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    }
+    return n.slice(0, 2).toUpperCase();
+  };
+
+  const userName = userProfile?.name || 'Oziel Souza';
+
   return (
-    <aside className={`hidden md:flex flex-col w-64 border-r transition-colors duration-200 shrink-0 ${
-      isDark ? 'bg-neutral-950 border-neutral-900 text-neutral-200' : 'bg-white border-slate-200 text-slate-800'
-    }`}>
+    <aside
+      className={`hidden md:flex flex-col w-64 border-r transition-colors duration-200 shrink-0 ${
+        isDark ? 'bg-neutral-950 border-neutral-900 text-neutral-200' : 'bg-white border-slate-200 text-slate-800'
+      }`}
+    >
       {/* Brand Header */}
       <div className="flex items-center gap-3 px-6 h-20 border-b border-inherit">
         <div className="relative flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-br from-purple-600 to-indigo-600 text-white shadow-[0_0_20px_rgba(168,85,247,0.4)]">
@@ -51,14 +81,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, isDar
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id)}
-              className={`w-full flex items-center justify-between px-3.5 py-3 rounded-xl font-medium text-sm transition-all duration-200 ${
+              className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl font-medium text-sm transition-all duration-200 ${
                 isActive
                   ? isDark
                     ? 'bg-purple-600/20 text-purple-300 border border-purple-500/30 shadow-[0_0_15px_rgba(168,85,247,0.15)]'
                     : 'bg-purple-50 text-purple-900 border border-purple-200'
                   : isDark
-                    ? 'text-neutral-400 hover:text-white hover:bg-neutral-900'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                  ? 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
               }`}
             >
               <div className="flex items-center gap-3">
@@ -75,17 +105,38 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, isDar
         })}
       </div>
 
-      {/* User Footer Card */}
+      {/* User Footer Card - Clickable to open Profile */}
       <div className="p-4 border-t border-inherit">
-        <div className={`p-3 rounded-xl flex items-center gap-3 ${isDark ? 'bg-neutral-900/80 border border-neutral-800' : 'bg-slate-50 border border-slate-200'}`}>
-          <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-purple-500 to-pink-500 flex items-center justify-center text-white font-bold text-sm shadow-md">
-            OP
-          </div>
+        <button
+          type="button"
+          onClick={() => setActiveTab('profile')}
+          className={`w-full p-3 rounded-xl flex items-center gap-3 text-left transition-all ${
+            activeTab === 'profile'
+              ? isDark
+                ? 'bg-purple-600/20 border border-purple-500/40'
+                : 'bg-purple-50 border border-purple-200'
+              : isDark
+              ? 'bg-neutral-900/80 border border-neutral-800 hover:border-purple-500/30'
+              : 'bg-slate-50 border border-slate-200 hover:border-purple-200'
+          }`}
+          title="Ver Meu Perfil"
+        >
+          {userProfile?.avatarUrl ? (
+            <img
+              src={userProfile.avatarUrl}
+              alt={userName}
+              className="w-9 h-9 rounded-full object-cover border border-purple-400/40 shadow-sm"
+            />
+          ) : (
+            <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-purple-500 to-pink-500 flex items-center justify-center text-white font-bold text-xs shadow-md">
+              {getInitials(userName)}
+            </div>
+          )}
           <div className="flex-1 min-w-0">
-            <p className="text-xs font-semibold truncate">Oziel Souza</p>
-            <p className="text-[11px] opacity-60 truncate">Plano Inteligente</p>
+            <p className="text-xs font-semibold truncate">{userName}</p>
+            <p className="text-[11px] opacity-60 truncate">Meu Perfil</p>
           </div>
-        </div>
+        </button>
       </div>
     </aside>
   );

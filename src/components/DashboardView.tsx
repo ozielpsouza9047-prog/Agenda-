@@ -2,7 +2,7 @@ import React from 'react';
 import { MetricCards } from './MetricCards';
 import { FinancialSummary, DebtItem } from '../types';
 import { aiRecommendations } from '../mockData';
-import { Sparkles, ArrowRight, AlertTriangle, CheckCircle2, ChevronRight, Plus, ShieldCheck, Zap } from 'lucide-react';
+import { Sparkles, ArrowRight, ChevronRight, Plus, Zap } from 'lucide-react';
 
 interface DashboardViewProps {
   summary: FinancialSummary;
@@ -10,6 +10,7 @@ interface DashboardViewProps {
   isDark: boolean;
   onOpenAddDebt: () => void;
   setActiveTab: (tab: any) => void;
+  hideValues?: boolean;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -17,9 +18,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   debts,
   isDark,
   onOpenAddDebt,
-  setActiveTab
+  setActiveTab,
+  hideValues = false,
 }) => {
   const formatCurrency = (val: number) => {
+    if (hideValues) return '••••••';
     return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val);
   };
 
@@ -39,7 +42,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   return (
     <div className="space-y-6 pb-20 md:pb-8">
       {/* 5 Core Metric Cards */}
-      <MetricCards summary={summary} isDark={isDark} />
+      <MetricCards summary={summary} isDark={isDark} hideValues={hideValues} />
 
       {/* AI Recommendation Banner */}
       <div className={`relative overflow-hidden p-6 rounded-2xl border ${
@@ -158,19 +161,35 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               Saúde Financeira Dívida Zero
             </h3>
 
-            <div className="flex items-center justify-center my-6">
-              <div className="relative w-36 h-36 flex items-center justify-center rounded-full border-8 border-purple-600/20 bg-purple-500/5 shadow-[0_0_20px_rgba(168,85,247,0.1)]">
-                <div className="absolute inset-0 rounded-full border-8 border-purple-500 border-t-transparent animate-spin-slow" style={{ animationDuration: '15s' }} />
-                <div className="text-center">
-                  <span className="text-3xl font-extrabold font-mono tabular-nums text-purple-400">68</span>
-                  <span className="block text-[10px] uppercase font-mono tracking-wider opacity-60">Índice Bom</span>
-                </div>
-              </div>
-            </div>
+            {(() => {
+              const totalOriginal = debts.reduce((acc, d) => acc + d.totalAmount, 0);
+              const totalRemaining = debts.reduce((acc, d) => acc + (d.status !== 'quitado' ? d.remainingAmount : 0), 0);
+              const hasOverdue = debts.some(d => d.status === 'atrasado');
+              const ratioPaid = totalOriginal > 0 ? (totalOriginal - totalRemaining) / totalOriginal : 1;
+              let calculatedScore = debts.length === 0 ? 100 : Math.min(100, Math.max(10, Math.round(ratioPaid * 100)));
+              if (hasOverdue) calculatedScore = Math.max(15, calculatedScore - 25);
 
-            <p className="text-xs text-center opacity-70 mb-4">
-              Seu nível de endividamento reduziu 12% nos últimos 30 dias com as ações recomendadas.
-            </p>
+              const scoreLabel = calculatedScore >= 80 ? 'Excelente' : calculatedScore >= 60 ? 'Índice Bom' : calculatedScore >= 40 ? 'Índice Regular' : 'Atenção';
+              const progressPercent = totalOriginal > 0 ? Math.round(ratioPaid * 100) : 100;
+
+              return (
+                <>
+                  <div className="flex items-center justify-center my-6">
+                    <div className="relative w-36 h-36 flex items-center justify-center rounded-full border-8 border-purple-600/20 bg-purple-500/5 shadow-[0_0_20px_rgba(168,85,247,0.1)]">
+                      <div className="absolute inset-0 rounded-full border-8 border-purple-500 border-t-transparent animate-spin-slow" style={{ animationDuration: '15s' }} />
+                      <div className="text-center">
+                        <span className="text-3xl font-extrabold font-mono tabular-nums text-purple-400">{calculatedScore}</span>
+                        <span className="block text-[10px] uppercase font-mono tracking-wider opacity-60">{scoreLabel}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-center opacity-70 mb-4">
+                    {progressPercent}% do saldo global amortizado.{hasOverdue ? ' Priorize contas em atraso para recuperar pontos.' : ' Seus pagamentos mantêm seu índice elevado.'}
+                  </p>
+                </>
+              );
+            })()}
 
             <div className="space-y-2">
               <button

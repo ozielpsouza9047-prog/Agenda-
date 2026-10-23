@@ -32,17 +32,19 @@ export function calculateFinancialSummary(debts: DebtItem[]): { summary: Financi
     });
   });
 
-  const nextActive = debts.find(d => d.status !== 'quitado') || debts[0];
+  const activeDebts = debts.filter(d => d.status !== 'quitado');
+  const sortedByDueDate = [...activeDebts].sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+  const nextActive = sortedByDueDate[0] || debts[0];
 
   const summary: FinancialSummary = {
-    totalDebts,
-    projectedMonthAmount,
+    totalDebts: Math.round(totalDebts * 100) / 100,
+    projectedMonthAmount: Math.round(projectedMonthAmount * 100) / 100,
     nextDueDate: nextActive ? nextActive.dueDate : 'N/A',
     nextDueTitle: nextActive ? nextActive.title : 'Nenhuma',
-    nextDueAmount: nextActive ? nextActive.monthlyPayment : 0,
-    overdueAmount,
+    nextDueAmount: nextActive ? Math.round(nextActive.monthlyPayment * 100) / 100 : 0,
+    overdueAmount: Math.round(overdueAmount * 100) / 100,
     overdueCount,
-    upcomingInstallmentsCount: debts.filter(d => d.status !== 'quitado').length
+    upcomingInstallmentsCount: activeDebts.length
   };
 
   return { summary, memory: memoryItems };

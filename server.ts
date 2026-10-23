@@ -9,25 +9,70 @@ dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-app.use(express.json());
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY || '',
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    }
-  }
+// Security headers and payload limits
+app.use(express.json({ limit: '1mb' }));
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
 });
 
+// Health check endpoint for production uptime monitoring
+app.get('/api/health', (_req, res) => {
+  res.json({
+    status: 'ok',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Protected server-side Gemini AI integration
 app.post('/api/ai-chat', async (req, res) => {
   try {
-    const { prompt, debtsContext } = req.body;
+    const { prompt, debtsContext } = req.body || {};
+
+    if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+      return res.status(400).json({ error: 'A pergunta enviada é inválida ou vazia.' });
+    }
+
+    if (prompt.length > 2000) {
+      return res.status(400).json({ error: 'A pergunta não pode exceder 2000 caracteres.' });
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(503).json({
+        error: 'A integração de IA está temporariamente indisponível no servidor. Use os cálculos do sistema.'
+      });
+    }
+
+    const safeDebts = Array.isArray(debtsContext) ? debtsContext.slice(0, 100).map(d => ({
+      title: String(d.title || '').slice(0, 80),
+      creditor: String(d.creditor || '').slice(0, 80),
+      category: String(d.category || '').slice(0, 50),
+      remainingAmount: Number(d.remainingAmount) || 0,
+      monthlyPayment: Number(d.monthlyPayment) || 0,
+      dueDate: String(d.dueDate || '').slice(0, 20),
+      status: String(d.status || '').slice(0, 30),
+      installmentsPaid: Number(d.installmentsPaid) || 0,
+      installmentsTotal: Number(d.installmentsTotal) || 1,
+      interestRate: Number(d.interestRate) || 0
+    })) : [];
+
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        }
+      }
+    });
 
     const systemInstruction = `Você é o consultor financeiro especialista da "Dívida Zero AI". 
-Você tem acesso aos dados reais e autorizados do usuário.
+Você tem acesso aos dados reais e autorizados do usuário autenticado.
 Dados atuais das dívidas do usuário:
-${JSON.stringify(debtsContext, null, 2)}
+${JSON.stringify(safeDebts, null, 2)}
 
 Responda de forma objetiva, empática, profissional e precisa em português brasileiro.
 Responda diretamente a perguntas como:
@@ -50,8 +95,15 @@ Se o usuário pedir para cadastrar, editar, excluir ou quitar uma dívida por co
 
     res.json({ reply: response.text || 'Não consegui processar sua consulta no momento.' });
   } catch (error: any) {
-    console.error('AI Chat Error:', error);
-    res.status(500).json({ error: error.message || 'Erro ao consultar a IA financeira.' });
+    const errStr = String(error?.message || error);
+    if (errStr.includes('429') || errStr.includes('quota') || errStr.includes('RESOURCE_EXHAUSTED')) {
+      return res.status(429).json({
+        error: 'Limite de cota de IA atingido. O assistente usará o modo offline de cálculos locais com dados reais.',
+        code: 'QUOTA_EXCEEDED'
+      });
+    }
+    console.error('AI Chat Error:', errStr);
+    res.status(500).json({ error: 'Erro ao consultar a IA financeira. Usando cálculos locais.' });
   }
 });
 
@@ -61,7 +113,7 @@ async function startServer() {
 
   if (isProd) {
     app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (req, res) => {
+    app.get('*', (_req, res) => {
       res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
     });
   } else {

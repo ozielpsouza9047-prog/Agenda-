@@ -31,19 +31,59 @@ export const CalendarView: React.FC<CalendarViewProps> = ({ debts, isDark, onUpd
     setPaymentModalOpen(true);
   };
 
+  const advanceDueDateByMonth = (dateStr: string): string => {
+    try {
+      const parts = dateStr.split('-');
+      if (parts.length === 3) {
+        let year = parseInt(parts[0], 10);
+        let month = parseInt(parts[1], 10);
+        const day = parseInt(parts[2], 10);
+        
+        month += 1;
+        if (month > 12) {
+          month = 1;
+          year += 1;
+        }
+        const daysInNewMonth = new Date(year, month, 0).getDate();
+        const clampedDay = Math.min(day, daysInNewMonth);
+        return `${year}-${String(month).padStart(2, '0')}-${String(clampedDay).padStart(2, '0')}`;
+      }
+    } catch {
+      // fallback
+    }
+    return dateStr;
+  };
+
   const handleConfirmPayment = () => {
     if (!selectedDebt) return;
 
     const paidIncrement = 1;
     const newPaid = Math.min(selectedDebt.installmentsTotal, selectedDebt.installmentsPaid + paidIncrement);
     const paidVal = parseFloat(paymentAmount) || selectedDebt.monthlyPayment;
-    const newRemaining = Math.max(0, selectedDebt.remainingAmount - paidVal);
+    const isQuitado = newPaid >= selectedDebt.installmentsTotal;
+    const newRemaining = isQuitado ? 0 : Math.max(0, selectedDebt.remainingAmount - paidVal);
+
+    let nextDueDate = selectedDebt.dueDate;
+    let nextStatus: DebtItem['status'] = 'quitado';
+
+    if (!isQuitado) {
+      nextDueDate = advanceDueDateByMonth(selectedDebt.dueDate);
+      const todayStr = new Date().toISOString().split('T')[0];
+      if (nextDueDate < todayStr) {
+        nextStatus = 'atrasado';
+      } else {
+        const diffTime = new Date(nextDueDate).getTime() - new Date(todayStr).getTime();
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        nextStatus = diffDays <= 7 ? 'proximo_vencimento' : 'em_dia';
+      }
+    }
 
     const updated: DebtItem = {
       ...selectedDebt,
+      dueDate: nextDueDate,
       installmentsPaid: newPaid,
-      remainingAmount: newRemaining,
-      status: newPaid >= selectedDebt.installmentsTotal ? 'quitado' : 'em_dia'
+      remainingAmount: Math.round(newRemaining * 100) / 100,
+      status: nextStatus
     };
 
     onUpdateDebt(updated);

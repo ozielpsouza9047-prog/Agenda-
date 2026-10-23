@@ -1,15 +1,25 @@
 import React, { useState, useEffect } from 'react';
-import { Sun, Moon, Shield, Bell, User, Lock, Smartphone, Download, Upload, CheckCircle2, AlertTriangle, FileText, Database } from 'lucide-react';
+import { Sun, Moon, Shield, Bell, User, Lock, Smartphone, Download, Upload, CheckCircle2, AlertTriangle, FileText, Database, Cloud } from 'lucide-react';
 import { DebtItem } from '../types';
+import { isSupabaseConfigured } from '../lib/supabase';
 
 interface SettingsViewProps {
   debts: DebtItem[];
   onRestoreDebts: (restored: DebtItem[]) => void;
   isDark: boolean;
   setIsDark: (val: boolean) => void;
+  onOpenAuthModal?: () => void;
+  isCloudConnected?: boolean;
 }
 
-export const SettingsView: React.FC<SettingsViewProps> = ({ debts, onRestoreDebts, isDark, setIsDark }) => {
+export const SettingsView: React.FC<SettingsViewProps> = ({
+  debts,
+  onRestoreDebts,
+  isDark,
+  setIsDark,
+  onOpenAuthModal,
+  isCloudConnected = false,
+}) => {
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [isInstalled, setIsInstalled] = useState<boolean>(false);
   const [lastBackupDate, setLastBackupDate] = useState<string>('Nunca');
@@ -94,19 +104,46 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ debts, onRestoreDebt
     const file = e.target.files?.[0];
     if (!file) return;
 
+    if (file.size > 5 * 1024 * 1024) {
+      setErrorMsg('O arquivo de backup é muito grande. O limite máximo é de 5MB.');
+      return;
+    }
+
     const reader = new FileReader();
+    reader.onerror = () => {
+      setErrorMsg('Falha ao ler o arquivo de backup.');
+    };
     reader.onload = (event) => {
       try {
         const json = JSON.parse(event.target?.result as string);
-        if (json && Array.isArray(json.debts)) {
-          setPreviewData(json.debts);
+        if (json && Array.isArray(json.debts) && json.debts.length > 0) {
+          const sanitizedDebts: DebtItem[] = json.debts.map((item: any, idx: number) => ({
+            id: typeof item.id === 'string' && item.id.trim() ? item.id : `restored-${Date.now()}-${idx}`,
+            title: String(item.title || 'Dívida Restaurada').slice(0, 100),
+            creditor: String(item.creditor || 'Credor').slice(0, 100),
+            category: (['Cartão de Crédito', 'Empréstimo', 'Financiamento', 'Conta Básica', 'Outros'] as const).includes(item.category)
+              ? item.category
+              : 'Outros',
+            totalAmount: Math.max(0, Number(item.totalAmount) || 0),
+            remainingAmount: Math.max(0, Number(item.remainingAmount) || 0),
+            monthlyPayment: Math.max(0, Number(item.monthlyPayment) || 0),
+            dueDate: typeof item.dueDate === 'string' && item.dueDate ? item.dueDate : new Date().toISOString().split('T')[0],
+            status: (['em_dia', 'atrasado', 'proximo_vencimento', 'quitado'] as const).includes(item.status)
+              ? item.status
+              : 'em_dia',
+            installmentsTotal: Math.max(1, Math.min(480, parseInt(item.installmentsTotal) || 1)),
+            installmentsPaid: Math.max(0, parseInt(item.installmentsPaid) || 0),
+            interestRate: Math.max(0, Math.min(100, parseFloat(item.interestRate) || 0))
+          }));
+
+          setPreviewData(sanitizedDebts);
           setIsRestoreModalOpen(true);
           setErrorMsg('');
         } else {
-          setErrorMsg('Arquivo de backup inválido. O formato JSON não contém o array de dívidas.');
+          setErrorMsg('Arquivo de backup inválido. O arquivo deve conter uma lista válida de dívidas.');
         }
       } catch (err) {
-        setErrorMsg('Erro ao ler o arquivo JSON. Verifique se o arquivo está corrompido.');
+        setErrorMsg('Erro ao ler o arquivo JSON. Certifique-se de que é um backup válido do Dívida Zero.');
       }
     };
     reader.readAsText(file);
@@ -118,8 +155,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ debts, onRestoreDebt
     if (mode === 'replace') {
       onRestoreDebts(previewData);
     } else {
-      const existingIds = new Set(debts.map(d => d.id));
-      const newItems = previewData.filter(d => !existingIds.has(d.id));
+      const existingKeys = new Set(
+        debts.map(d => `${d.id}|${d.title.toLowerCase().trim()}|${d.totalAmount}`)
+      );
+      const newItems = previewData.filter(
+        d => !existingKeys.has(`${d.id}|${d.title.toLowerCase().trim()}|${d.totalAmount}`)
+      );
       onRestoreDebts([...debts, ...newItems]);
     }
 
@@ -236,6 +277,50 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ debts, onRestoreDebt
               <input type="file" accept=".json" onChange={handleFileSelectForRestore} className="hidden" />
             </label>
           </div>
+        </div>
+
+        {/* Supabase Cloud & Database Integration */}
+        <div className={`p-6 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
+          isDark ? 'bg-neutral-900/80 border-neutral-800' : 'bg-white border-slate-200'
+        }`}>
+          <div className="flex items-start gap-4">
+            <div className={`p-3 rounded-xl shrink-0 ${
+              isCloudConnected
+                ? 'bg-emerald-500/20 text-emerald-400'
+                : 'bg-purple-600/20 text-purple-400'
+            }`}>
+              <Database className="w-6 h-6" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                  Banco de Dados na Nuvem (Supabase)
+                </h3>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                  isCloudConnected
+                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                    : isSupabaseConfigured()
+                    ? 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
+                    : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                }`}>
+                  {isCloudConnected ? 'RLS Conectado' : isSupabaseConfigured() ? 'Aguardando Login' : 'Não Vinculado'}
+                </span>
+              </div>
+              <p className="text-xs opacity-60 mt-0.5 max-w-md">
+                Persistência em nuvem com Row Level Security (RLS) isolando dados exclusivamente para cada usuário.
+              </p>
+            </div>
+          </div>
+
+          {onOpenAuthModal && (
+            <button
+              onClick={onOpenAuthModal}
+              className="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-md flex items-center gap-2 transition-all shrink-0"
+            >
+              <Database className="w-4 h-4" />
+              <span>{isCloudConnected ? 'Status da Conexão' : 'Configurar / Entrar'}</span>
+            </button>
+          )}
         </div>
 
         {/* PWA Install Section */}
