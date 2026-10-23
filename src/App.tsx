@@ -4,13 +4,17 @@ import { BottomNav } from './components/BottomNav';
 import { Header } from './components/Header';
 import { DashboardView } from './components/DashboardView';
 import { DebtsView } from './components/DebtsView';
-import { ForecastView } from './components/ForecastView';
+import { CalendarView } from './components/CalendarView';
+import { ReportsView } from './components/ReportsView';
 import { AIAssistantView } from './components/AIAssistantView';
 import { SettingsView } from './components/SettingsView';
 import { AddDebtModal } from './components/AddDebtModal';
+import { CalculationMemoryModal } from './components/CalculationMemoryModal';
+import { ImportBoletoModal } from './components/ImportBoletoModal';
 import { ActiveTab, DebtItem, FinancialSummary } from './types';
 import { initialDebts, initialSummary } from './mockData';
-import { X, ShieldAlert, LayoutDashboard, Wallet, TrendingUp, Sparkles, Settings } from 'lucide-react';
+import { calculateFinancialSummary } from './utils/calculations';
+import { X, ShieldAlert, LayoutDashboard, Wallet, Calendar, BarChart3, Sparkles, Settings, Calculator } from 'lucide-react';
 
 export default function App() {
   const [isDark, setIsDark] = useState<boolean>(true);
@@ -30,35 +34,20 @@ export default function App() {
   });
 
   const [summary, setSummary] = useState<FinancialSummary>(initialSummary);
+  const [memoryItems, setMemoryItems] = useState<{ label: string; formula: string; value: string }[]>([]);
   const [isAddModalOpen, setIsAddModalOpen] = useState<boolean>(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
+  const [isMemoryModalOpen, setIsMemoryModalOpen] = useState<boolean>(false);
   const [editingDebt, setEditingDebt] = useState<DebtItem | null>(null);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
 
-  // Save debts to localStorage whenever debts change
+  // Automatic recalculation hook whenever debts change
   useEffect(() => {
     localStorage.setItem('divida_zero_debts', JSON.stringify(debts));
-    updateSummary(debts);
+    const result = calculateFinancialSummary(debts);
+    setSummary(result.summary);
+    setMemoryItems(result.memory);
   }, [debts]);
-
-  const updateSummary = (currentDebts: DebtItem[]) => {
-    const totalDebts = currentDebts.reduce((acc, d) => acc + d.remainingAmount, 0);
-    const projectedMonthAmount = currentDebts.reduce((acc, d) => acc + d.monthlyPayment, 0);
-    const overdueCount = currentDebts.filter(d => d.status === 'atrasado').length;
-    const overdueAmount = currentDebts.filter(d => d.status === 'atrasado').reduce((acc, d) => acc + d.remainingAmount, 0);
-
-    const firstActive = currentDebts.find(d => d.status !== 'quitado') || currentDebts[0];
-
-    setSummary({
-      totalDebts,
-      projectedMonthAmount,
-      nextDueDate: firstActive ? firstActive.dueDate : '28/10/2026',
-      nextDueTitle: firstActive ? firstActive.title : 'Nenhuma',
-      nextDueAmount: firstActive ? firstActive.monthlyPayment : 0,
-      overdueAmount,
-      overdueCount,
-      upcomingInstallmentsCount: currentDebts.length
-    });
-  };
 
   // Handle saving (add or update) a debt
   const handleSaveDebt = (debtItem: DebtItem) => {
@@ -73,6 +62,11 @@ export default function App() {
     setEditingDebt(null);
   };
 
+  // Handle importing a debt from PDF boleto
+  const handleImportDebt = (debtItem: DebtItem) => {
+    setDebts(prev => [debtItem, ...prev]);
+  };
+
   // Handle editing request
   const handleOpenEditDebt = (debt: DebtItem) => {
     setEditingDebt(debt);
@@ -83,6 +77,11 @@ export default function App() {
   const handleDeleteDebt = (id: string) => {
     const updatedDebts = debts.filter(d => d.id !== id);
     setDebts(updatedDebts);
+  };
+
+  // Handle restoring debts from backup
+  const handleRestoreDebts = (restored: DebtItem[]) => {
+    setDebts(restored);
   };
 
   return (
@@ -103,7 +102,25 @@ export default function App() {
             setEditingDebt(null);
             setIsAddModalOpen(true);
           }}
+          onOpenImportBoleto={() => setIsImportModalOpen(true)}
         />
+
+        {/* Calculation Memory Trigger Bar */}
+        <div className={`px-6 py-2.5 border-b flex items-center justify-between text-xs ${
+          isDark ? 'bg-neutral-900/60 border-neutral-900 text-neutral-300' : 'bg-slate-100 border-slate-200 text-slate-700'
+        }`}>
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span>Recálculo Automático Ativo · {debts.length} dívidas monitoradas</span>
+          </div>
+          <button
+            onClick={() => setIsMemoryModalOpen(true)}
+            className="flex items-center gap-1.5 font-semibold text-purple-400 hover:text-purple-300 transition-colors"
+          >
+            <Calculator className="w-3.5 h-3.5" />
+            <span>Ver Memória de Cálculo</span>
+          </button>
+        </div>
 
         <main className="flex-1 p-4 md:p-8 max-w-7xl w-full mx-auto">
           {activeTab === 'dashboard' && (
@@ -133,15 +150,19 @@ export default function App() {
           )}
 
           {activeTab === 'forecast' && (
-            <ForecastView summary={summary} isDark={isDark} />
+            <CalendarView debts={debts} isDark={isDark} onUpdateDebt={handleSaveDebt} />
+          )}
+
+          {activeTab === 'reports' && (
+            <ReportsView debts={debts} isDark={isDark} />
           )}
 
           {activeTab === 'ai_advisor' && (
-            <AIAssistantView isDark={isDark} />
+            <AIAssistantView debts={debts} isDark={isDark} />
           )}
 
           {activeTab === 'settings' && (
-            <SettingsView isDark={isDark} setIsDark={setIsDark} />
+            <SettingsView debts={debts} onRestoreDebts={handleRestoreDebts} isDark={isDark} setIsDark={setIsDark} />
           )}
         </main>
       </div>
@@ -177,7 +198,8 @@ export default function App() {
               {[
                 { id: 'dashboard' as ActiveTab, label: 'Visão Geral', icon: LayoutDashboard },
                 { id: 'debts' as ActiveTab, label: 'Minhas Dívidas', icon: Wallet },
-                { id: 'forecast' as ActiveTab, label: 'Previsões & Fluxo', icon: TrendingUp },
+                { id: 'forecast' as ActiveTab, label: 'Calendário & Fluxo', icon: Calendar },
+                { id: 'reports' as ActiveTab, label: 'Relatórios', icon: BarChart3 },
                 { id: 'ai_advisor' as ActiveTab, label: 'IA Dívida Zero', icon: Sparkles },
                 { id: 'settings' as ActiveTab, label: 'Configurações', icon: Settings },
               ].map(item => {
@@ -216,6 +238,26 @@ export default function App() {
         }}
         onSaveDebt={handleSaveDebt}
         editingDebt={editingDebt}
+        isDark={isDark}
+      />
+
+      {/* Import Boleto Modal */}
+      <ImportBoletoModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        onImportDebt={handleImportDebt}
+        existingDebts={debts}
+        isDark={isDark}
+      />
+
+      {/* Calculation Memory Modal */}
+      <CalculationMemoryModal
+        isOpen={isMemoryModalOpen}
+        onClose={() => setIsMemoryModalOpen(false)}
+        memoryItems={memoryItems}
+        totalDebts={summary.totalDebts}
+        projectedMonth={summary.projectedMonthAmount}
+        overdueAmount={summary.overdueAmount}
         isDark={isDark}
       />
     </div>

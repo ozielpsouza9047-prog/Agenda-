@@ -1,5 +1,5 @@
 import React from 'react';
-import { Sun, Moon, Bell, Search, Menu, ShieldAlert } from 'lucide-react';
+import { Sun, Moon, Bell, Search, Menu, ShieldAlert, FileUp } from 'lucide-react';
 import { ActiveTab } from '../types';
 
 interface HeaderProps {
@@ -8,6 +8,7 @@ interface HeaderProps {
   setIsDark: (val: boolean) => void;
   onOpenMobileMenu: () => void;
   onOpenAddDebt: () => void;
+  onOpenImportBoleto: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -15,13 +16,15 @@ export const Header: React.FC<HeaderProps> = ({
   isDark,
   setIsDark,
   onOpenMobileMenu,
-  onOpenAddDebt
+  onOpenAddDebt,
+  onOpenImportBoleto
 }) => {
   const getTabTitle = (tab: ActiveTab) => {
     switch (tab) {
       case 'dashboard': return 'Visão Geral & Indicadores';
       case 'debts': return 'Gerenciamento de Dívidas';
       case 'forecast': return 'Previsões & Fluxo de Caixa';
+      case 'reports': return 'Relatórios Financeiros & Análises';
       case 'ai_advisor': return 'Consultor IA Dívida Zero';
       case 'settings': return 'Configurações da Conta';
     }
@@ -56,7 +59,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Right Actions: Search, Theme Toggle, Notification, Primary Button */}
+      {/* Right Actions: Search, Theme Toggle, Import PDF, Primary Button */}
       <div className="flex items-center gap-3">
         {/* Search input (desktop) */}
         <div className="hidden lg:flex items-center relative">
@@ -85,23 +88,24 @@ export const Header: React.FC<HeaderProps> = ({
           {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
         </button>
 
-        {/* Notifications button */}
-        <div className="relative">
-          <button
-            className={`p-2.5 rounded-xl border transition-all duration-200 ${
-              isDark ? 'bg-neutral-900 border-neutral-800 text-neutral-300 hover:bg-neutral-800' : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
-            }`}
-            title="Notificações"
-          >
-            <Bell className="w-4 h-4" />
-            <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-purple-500 animate-pulse" />
-          </button>
-        </div>
+        {/* Import PDF Boleto Button */}
+        <button
+          onClick={onOpenImportBoleto}
+          className={`hidden sm:inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold border transition-all ${
+            isDark
+              ? 'bg-neutral-900 border-neutral-800 text-purple-300 hover:bg-neutral-800 hover:border-purple-500/40'
+              : 'bg-slate-50 border-slate-200 text-purple-800 hover:bg-slate-100'
+          }`}
+          title="Importar Boleto PDF"
+        >
+          <FileUp className="w-4 h-4 text-purple-400" />
+          <span>Importar PDF</span>
+        </button>
 
         {/* Primary CTA */}
         <button
           onClick={onOpenAddDebt}
-          className="hidden sm:inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-[0_0_20px_rgba(168,85,247,0.3)] transition-all transform active:scale-95 whitespace-nowrap"
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-[0_0_20px_rgba(168,85,247,0.3)] transition-all transform active:scale-95 whitespace-nowrap"
         >
           <span>+ Nova Dívida</span>
         </button>

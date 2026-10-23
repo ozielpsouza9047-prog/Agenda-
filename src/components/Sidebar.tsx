@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutDashboard, Wallet, TrendingUp, Sparkles, Settings, ShieldAlert, LogOut, ArrowRightLeft } from 'lucide-react';
+import { LayoutDashboard, Wallet, Calendar, BarChart3, Sparkles, Settings, ShieldAlert } from 'lucide-react';
 import { ActiveTab } from '../types';
 
 interface SidebarProps {
@@ -12,7 +12,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, isDar
   const menuItems = [
     { id: 'dashboard' as ActiveTab, label: 'Visão Geral', icon: LayoutDashboard },
     { id: 'debts' as ActiveTab, label: 'Minhas Dívidas', icon: Wallet },
-    { id: 'forecast' as ActiveTab, label: 'Previsões & Fluxo', icon: TrendingUp },
+    { id: 'forecast' as ActiveTab, label: 'Calendário & Fluxo', icon: Calendar },
+    { id: 'reports' as ActiveTab, label: 'Relatórios', icon: BarChart3 },
     { id: 'ai_advisor' as ActiveTab, label: 'IA Dívida Zero', icon: Sparkles, badge: 'IA' },
     { id: 'settings' as ActiveTab, label: 'Configurações', icon: Settings },
   ];

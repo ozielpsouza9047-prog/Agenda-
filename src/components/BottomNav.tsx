@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutDashboard, Wallet, TrendingUp, Sparkles, Settings } from 'lucide-react';
+import { LayoutDashboard, Wallet, Calendar, Sparkles, Settings } from 'lucide-react';
 import { ActiveTab } from '../types';
 
 interface BottomNavProps {
@@ -12,7 +12,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({ activeTab, setActiveTab, i
   const navItems = [
     { id: 'dashboard' as ActiveTab, label: 'Início', icon: LayoutDashboard },
     { id: 'debts' as ActiveTab, label: 'Dívidas', icon: Wallet },
-    { id: 'forecast' as ActiveTab, label: 'Previsões', icon: TrendingUp },
+    { id: 'forecast' as ActiveTab, label: 'Calendário', icon: Calendar },
     { id: 'ai_advisor' as ActiveTab, label: 'IA Assist', icon: Sparkles },
     { id: 'settings' as ActiveTab, label: 'Ajustes', icon: Settings },
   ];
