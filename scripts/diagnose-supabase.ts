@@ -1,8 +1,9 @@
 import dotenv from 'dotenv';
+import { SUPABASE_CONFIG } from '../src/lib/supabase';
 dotenv.config();
 
-const url = (process.env.VITE_SUPABASE_URL || '').trim();
-const anonKey = (process.env.VITE_SUPABASE_ANON_KEY || '').trim();
+const url = (process.env.VITE_SUPABASE_URL || SUPABASE_CONFIG.url || '').trim();
+const anonKey = (process.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_rb7DK-hVidb3_zgYFE00jw_3GcU2BgI').trim();
 
 async function runDiagnosis() {
   console.log('====================================================');

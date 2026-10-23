@@ -20,9 +20,13 @@ import {
   Info,
   X,
   Cloud,
-  Database
+  Database,
+  KeyRound,
+  Mail,
+  Loader2
 } from 'lucide-react';
 import { UserProfile, DebtItem } from '../types';
+import { updateUserCredentials } from '../lib/supabase';
 
 interface ProfileViewProps {
   profile: UserProfile;
@@ -49,11 +53,19 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 }) => {
   // Local form state initialized from profile
   const [name, setName] = useState(profile.name);
+  const [email, setEmail] = useState(profile.email);
   const [avatarUrl, setAvatarUrl] = useState(profile.avatarUrl || '');
   const [currency, setCurrency] = useState<'BRL' | 'USD' | 'EUR'>(profile.currency || 'BRL');
   const [hideValues, setHideValues] = useState(profile.hideValuesOnDashboard);
   const [allowAi, setAllowAi] = useState(profile.allowAiDataAnalysis);
   const [biometricLock, setBiometricLock] = useState(profile.biometricLock);
+
+  // Credentials update state (email & password)
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [isUpdatingCredentials, setIsUpdatingCredentials] = useState(false);
+  const [credFeedback, setCredFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Notifications preferences
   const [notifPreferences, setNotifPreferences] = useState(profile.notificationPreferences);
@@ -73,18 +85,67 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     }, 3500);
   };
 
+  // Handle changing email and/or password inside the app
+  const handleUpdateCredentials = async () => {
+    setCredFeedback(null);
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedPassword = newPassword.trim();
+
+    if (!trimmedEmail) {
+      setCredFeedback({ type: 'error', text: 'O campo de e-mail não pode ficar vazio.' });
+      return;
+    }
+
+    if (trimmedPassword && trimmedPassword.length < 6) {
+      setCredFeedback({ type: 'error', text: 'A nova senha deve ter pelo menos 6 caracteres.' });
+      return;
+    }
+
+    if (trimmedPassword && trimmedPassword !== confirmPassword.trim()) {
+      setCredFeedback({ type: 'error', text: 'A confirmação de senha não confere com a nova senha.' });
+      return;
+    }
+
+    setIsUpdatingCredentials(true);
+    try {
+      const result = await updateUserCredentials({
+        newEmail: trimmedEmail !== profile.email.toLowerCase() ? trimmedEmail : undefined,
+        newPassword: trimmedPassword || undefined,
+        currentEmail: profile.email,
+      });
+
+      const updated: UserProfile = {
+        ...profile,
+        name: name.trim() || profile.name,
+        email: trimmedEmail,
+      };
+      onUpdateProfile(updated);
+      setNewPassword('');
+      setConfirmPassword('');
+      setCredFeedback({ type: 'success', text: result.message });
+      showToast('Credenciais atualizadas com sucesso!');
+    } catch (err: any) {
+      setCredFeedback({
+        type: 'error',
+        text: err?.message || 'Não foi possível atualizar as credenciais.',
+      });
+    } finally {
+      setIsUpdatingCredentials(false);
+    }
+  };
+
   // Avatar upload handler
   const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     if (!file.type.startsWith('image/')) {
-      alert('Por favor, selecione um arquivo de imagem válido (PNG, JPG, WEBP).');
+      showToast('Por favor, selecione um arquivo de imagem válido (PNG, JPG, WEBP).');
       return;
     }
 
     if (file.size > 2 * 1024 * 1024) {
-      alert('A imagem é muito grande. Escolha uma imagem de até 2MB.');
+      showToast('A imagem é muito grande. Escolha uma imagem de até 2MB.');
       return;
     }
 
@@ -116,13 +177,14 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) {
-      alert('O nome não pode estar em branco.');
+      showToast('O nome não pode estar em branco.');
       return;
     }
 
     const updated: UserProfile = {
       ...profile,
       name: name.trim(),
+      email: email.trim() || profile.email,
       avatarUrl,
       currency,
       hideValuesOnDashboard: hideValues,
@@ -347,19 +409,125 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
             <div>
               <label className="block font-medium opacity-80 mb-1.5">
-                E-mail (Identificador do Usuário)
+                E-mail de Acesso
               </label>
-              <input
-                type="email"
-                disabled
-                value={profile.email}
-                className={`w-full p-2.5 rounded-xl border outline-none text-xs opacity-60 cursor-not-allowed ${
-                  isDark ? 'bg-neutral-950/50 border-neutral-800 text-neutral-400' : 'bg-slate-100 border-slate-200 text-slate-500'
-                }`}
-              />
+              <div className="relative">
+                <Mail className="w-4 h-4 absolute left-3 top-2.5 opacity-40" />
+                <input
+                  type="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className={`w-full pl-9 pr-4 py-2.5 rounded-xl border outline-none text-xs transition-colors ${
+                    isDark
+                      ? 'bg-neutral-950 border-neutral-800 text-white focus:border-purple-500'
+                      : 'bg-slate-50 border-slate-200 text-slate-900 focus:border-purple-400'
+                  }`}
+                  placeholder="seuemail@exemplo.com"
+                />
+              </div>
               <span className="block text-[10px] opacity-50 mt-1">
-                O e-mail é o identificador único da conta e garante isolamento dos dados.
+                Você pode alterar seu e-mail provisório para o seu e-mail definitivo a qualquer momento.
               </span>
+            </div>
+          </div>
+
+          {/* Trocar E-mail e Senha de Acesso */}
+          <div
+            className={`p-4 rounded-xl border space-y-3 ${
+              isDark ? 'bg-neutral-950/60 border-neutral-800' : 'bg-slate-50 border-slate-200'
+            }`}
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <KeyRound className="w-4 h-4 text-purple-400" />
+                <span className="text-xs font-bold">Alterar E-mail ou Senha de Acesso</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="text-[11px] text-purple-400 hover:text-purple-300 flex items-center gap-1"
+              >
+                {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                <span>{showPassword ? 'Ocultar Senha' : 'Mostrar Senha'}</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div>
+                <label className="block font-medium opacity-80 mb-1">
+                  Nova Senha (opcional)
+                </label>
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="Mínimo de 6 caracteres"
+                  className={`w-full p-2.5 rounded-xl border outline-none text-xs transition-colors ${
+                    isDark
+                      ? 'bg-neutral-900 border-neutral-800 text-white focus:border-purple-500'
+                      : 'bg-white border-slate-200 text-slate-900 focus:border-purple-400'
+                  }`}
+                />
+              </div>
+
+              <div>
+                <label className="block font-medium opacity-80 mb-1">
+                  Confirmar Nova Senha
+                </label>
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Repita a nova senha"
+                  className={`w-full p-2.5 rounded-xl border outline-none text-xs transition-colors ${
+                    isDark
+                      ? 'bg-neutral-900 border-neutral-800 text-white focus:border-purple-500'
+                      : 'bg-white border-slate-200 text-slate-900 focus:border-purple-400'
+                  }`}
+                />
+              </div>
+            </div>
+
+            {credFeedback && (
+              <div
+                className={`p-3 rounded-xl border text-xs flex items-center gap-2 ${
+                  credFeedback.type === 'success'
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                    : 'bg-rose-500/10 border-rose-500/30 text-rose-400'
+                }`}
+              >
+                {credFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                )}
+                <span>{credFeedback.text}</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <span className="text-[11px] opacity-60">
+                Atualiza o e-mail preenchido acima e/ou define sua nova senha pessoal.
+              </span>
+              <button
+                type="button"
+                disabled={isUpdatingCredentials}
+                onClick={handleUpdateCredentials}
+                className="px-4 py-2 rounded-xl text-xs font-semibold bg-purple-600 hover:bg-purple-500 text-white shadow-sm flex items-center gap-1.5 transition-all shrink-0 disabled:opacity-50"
+              >
+                {isUpdatingCredentials ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Atualizando...</span>
+                  </>
+                ) : (
+                  <>
+                    <KeyRound className="w-3.5 h-3.5" />
+                    <span>Atualizar E-mail / Senha</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
 

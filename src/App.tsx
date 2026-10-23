@@ -151,13 +151,21 @@ export default function App() {
         if (!isMounted) return;
         if (session?.user) {
           setAuthUser(session.user);
-          const cloudProfile = await fetchCloudProfile(session.user.id);
-          if (cloudProfile && isMounted) {
-            setUserProfile(cloudProfile);
-          }
-          const cloudDebts = await fetchCloudDebts(session.user.id);
-          if (cloudDebts && cloudDebts.length > 0 && isMounted) {
-            setDebts(cloudDebts);
+          if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+            const cloudProfile = await fetchCloudProfile(session.user.id);
+            if (cloudProfile && isMounted) {
+              setUserProfile(cloudProfile);
+            } else if (isMounted) {
+              setUserProfile(prev => ({
+                ...prev,
+                email: session.user.email || prev.email,
+                name: session.user.user_metadata?.name || prev.name,
+              }));
+            }
+            const cloudDebts = await fetchCloudDebts(session.user.id);
+            if (cloudDebts && cloudDebts.length > 0 && isMounted) {
+              setDebts(cloudDebts);
+            }
           }
         } else if (event === 'SIGNED_OUT') {
           setAuthUser(null);

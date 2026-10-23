@@ -1,10 +1,51 @@
 import { createClient, SupabaseClient, User } from '@supabase/supabase-js';
 import { DebtItem, GoalItem, UserProfile } from '../types';
 
-// Retrieve environment variables with fallback (isomorphic for Vite browser and Node/testing)
+// Retrieve environment variables (isomorphic for Vite browser and Node/testing)
 const env = typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env : (typeof process !== 'undefined' ? process.env : {});
-const supabaseUrl = (env.VITE_SUPABASE_URL || 'https://ihjpxxlotdmxvrccbukf.supabase.co').trim();
-const supabaseAnonKey = (env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_rb7DK-hVidb3_zgYFE00jw_3GcU2BgI').trim();
+const DEFAULT_SUPABASE_URL = 'https://ihjpxxlotdmxvrccbukf.supabase.co';
+const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_rb7DK-hVidb3_zgYFE00jw_3GcU2BgI';
+const rawSupabaseUrl = (env.VITE_SUPABASE_URL || '').trim();
+const rawSupabaseAnonKey = (env.VITE_SUPABASE_ANON_KEY || '').trim();
+
+/**
+ * Checks if a value is an unconfigured placeholder or literal variable name.
+ */
+export const isPlaceholderOrLiteral = (value: string): boolean => {
+  const clean = (value || '').trim().toLowerCase();
+  return (
+    !clean ||
+    clean === 'vite_supabase_url' ||
+    clean === 'vite_supabase_anon_key' ||
+    clean.startsWith('vite_') ||
+    clean.includes('coloque_aqui') ||
+    clean.includes('sua_chave') ||
+    clean.includes('sua_url') ||
+    clean.includes('your_anon_key') ||
+    clean.includes('your-anon-key') ||
+    clean.includes('your_supabase_url') ||
+    clean.includes('placeholder') ||
+    clean === 'undefined' ||
+    clean === 'null' ||
+    clean === 'coloque_aqui_sua_chave_publica_sb_publishable'
+  );
+};
+
+/**
+ * Validates that a Supabase URL is a real HTTP/HTTPS endpoint and not a literal variable name or placeholder.
+ */
+export const isValidSupabaseUrl = (url: string): boolean => {
+  const clean = (url || '').trim();
+  if (!clean || isPlaceholderOrLiteral(clean)) {
+    return false;
+  }
+  try {
+    const parsed = new URL(clean);
+    return (parsed.protocol === 'https:' || parsed.protocol === 'http:') && parsed.hostname.includes('.');
+  } catch {
+    return false;
+  }
+};
 
 /**
  * Checks if a provided key is a secret service_role key.
@@ -16,40 +57,40 @@ export const isSecretKey = (key: string): boolean => {
 };
 
 /**
- * Checks if key is still an unconfigured placeholder.
+ * Checks if key is still an unconfigured placeholder or literal variable name.
  */
 export const isPlaceholderKey = (key: string): boolean => {
-  const clean = (key || '').trim().toLowerCase();
-  return (
-    !clean ||
-    clean.includes('coloque_aqui') ||
-    clean.includes('sua_chave') ||
-    clean.includes('your_anon_key') ||
-    clean.includes('your-anon-key') ||
-    clean === 'coloque_aqui_sua_chave_publica_sb_publishable'
-  );
+  return isPlaceholderOrLiteral(key);
 };
 
 /**
  * Validates public key format:
  * - Accepts new Supabase publishable keys: "sb_publishable_..."
- * - Accepts standard Supabase anon JWT keys: "eyJ..."
+ * - Accepts standard Supabase anon JWT keys: "eyJ..." (3-part JWT)
  * - Rejects secret keys ("sb_secret_", "service_role")
- * - Rejects unconfigured placeholders
+ * - Rejects unconfigured placeholders and literal variable names
  */
 export const isValidPublicKey = (key: string): boolean => {
   const clean = (key || '').trim();
   if (!clean || isSecretKey(clean) || isPlaceholderKey(clean)) {
     return false;
   }
-  return clean.startsWith('sb_publishable_') || clean.startsWith('eyJ') || clean.length >= 20;
+  const isPublishable = clean.startsWith('sb_publishable_') && clean.length > 20;
+  const isJwt = clean.startsWith('eyJ') && clean.split('.').length === 3 && clean.length > 40;
+  return isPublishable || isJwt;
 };
+
+const supabaseUrl = isValidSupabaseUrl(rawSupabaseUrl) ? rawSupabaseUrl : DEFAULT_SUPABASE_URL;
+const supabaseAnonKey = isSecretKey(rawSupabaseAnonKey)
+  ? rawSupabaseAnonKey
+  : isValidPublicKey(rawSupabaseAnonKey)
+  ? rawSupabaseAnonKey
+  : DEFAULT_SUPABASE_ANON_KEY;
 
 // Check if credentials are validly provided for live operation
 export const isSupabaseConfigured = (): boolean => {
   return (
-    Boolean(supabaseUrl) &&
-    supabaseUrl.startsWith('http') &&
+    isValidSupabaseUrl(supabaseUrl) &&
     isValidPublicKey(supabaseAnonKey)
   );
 };
@@ -57,12 +98,12 @@ export const isSupabaseConfigured = (): boolean => {
 // Configuration inspection state
 export const SUPABASE_CONFIG = {
   url: supabaseUrl,
-  hasUrl: Boolean(supabaseUrl && supabaseUrl.startsWith('http')),
-  hasKey: Boolean(supabaseAnonKey),
+  hasUrl: isValidSupabaseUrl(supabaseUrl),
+  hasKey: isValidPublicKey(supabaseAnonKey),
   isPlaceholder: isPlaceholderKey(supabaseAnonKey),
   isSecretBlocked: isSecretKey(supabaseAnonKey),
-  isPublishableFormat: supabaseAnonKey.startsWith('sb_publishable_'),
-  isJwtFormat: supabaseAnonKey.startsWith('eyJ'),
+  isPublishableFormat: isValidPublicKey(supabaseAnonKey) && supabaseAnonKey.startsWith('sb_publishable_'),
+  isJwtFormat: isValidPublicKey(supabaseAnonKey) && supabaseAnonKey.startsWith('eyJ'),
   isConfigured: isSupabaseConfigured(),
 };
 
@@ -113,18 +154,16 @@ export async function testSupabaseConnection(): Promise<SupabaseDiagnostics> {
   const testedAt = new Date().toISOString();
   const url = supabaseUrl;
 
-  const keyStatus = isSecretKey(supabaseAnonKey)
+  const keyStatus = !supabaseAnonKey
+    ? 'missing'
+    : isSecretKey(supabaseAnonKey)
     ? 'secret_blocked'
     : isPlaceholderKey(supabaseAnonKey)
     ? 'placeholder'
-    : !supabaseAnonKey
-    ? 'missing'
-    : supabaseAnonKey.startsWith('sb_publishable_')
-    ? 'valid_publishable'
-    : supabaseAnonKey.startsWith('eyJ')
-    ? 'valid_jwt'
     : isValidPublicKey(supabaseAnonKey)
-    ? 'valid_publishable'
+    ? supabaseAnonKey.startsWith('sb_publishable_')
+      ? 'valid_publishable'
+      : 'valid_jwt'
     : 'invalid';
 
   const diag: SupabaseDiagnostics = {
@@ -139,8 +178,8 @@ export async function testSupabaseConnection(): Promise<SupabaseDiagnostics> {
     testedAt,
   };
 
-  if (!url || !url.startsWith('http')) {
-    diag.details = 'VITE_SUPABASE_URL ausente ou inválida no .env.';
+  if (!isValidSupabaseUrl(url)) {
+    diag.details = 'URL do projeto ausente ou inválida.';
     return diag;
   }
 
@@ -170,9 +209,9 @@ export async function testSupabaseConnection(): Promise<SupabaseDiagnostics> {
       diag.authHealthOk = true;
     }
 
-    if (keyStatus === 'placeholder') {
+    if (keyStatus === 'missing' || keyStatus === 'placeholder' || keyStatus === 'invalid') {
       diag.schemaStatus = 'unauthorized';
-      diag.details = `Instância do Supabase online (${diag.projectRef || 'ihjpxxlotdmxvrccbukf'}), mas a chave pública ainda é o placeholder. Configure sua chave real sb_publishable_... ou anon no .env.`;
+      diag.details = `Instância do Supabase online (${diag.projectRef || 'ihjpxxlotdmxvrccbukf'}), mas a credencial pública real está pendente de configuração. A autenticação permanece desativada até ser configurada.`;
       return diag;
     }
 
@@ -184,10 +223,10 @@ export async function testSupabaseConnection(): Promise<SupabaseDiagnostics> {
       } else {
         if (error.code === '42P01' || error.code === 'PGRST205' || error.message?.includes('schema cache')) {
           diag.schemaStatus = 'pending_schema';
-          diag.details = 'Banco acessível, porém a tabela "debts" não foi encontrada. Aplique o supabase/schema.sql no SQL Editor.';
+          diag.details = 'Banco acessível, porém as tabelas do schema public (profiles, debts, installments, payments, goals) ainda não foram encontradas (PGRST205). Execute o arquivo supabase/schema.sql no SQL Editor do Supabase.';
         } else if (error.code === '42501' || error.message?.includes('row-level security') || error.message?.includes('permission denied')) {
           diag.schemaStatus = 'applied';
-          diag.details = 'Tabelas encontradas e protegidas por RLS (autenticação de usuário necessária para acesso aos dados).';
+          diag.details = 'Tabelas encontradas e protegidas por RLS e privilégios restritos à role authenticated (faça login para acessar seus dados).';
         } else if (error.message?.includes('JWT') || error.message?.includes('API key')) {
           diag.schemaStatus = 'unauthorized';
           diag.details = `Chave pública recusada pelo Supabase: ${error.message}`;
@@ -211,6 +250,29 @@ export async function testSupabaseConnection(): Promise<SupabaseDiagnostics> {
 // AUTHENTICATION SERVICES
 // ==========================================
 
+/**
+ * Verifies that an active authenticated JWT session exists in Supabase Auth
+ * and matches the expected userId before querying or mutating RLS-protected tables.
+ * Prevents unauthenticated 'anon' table queries (42501 permission denied) and
+ * cross-user RLS policy violations (auth.uid() mismatch).
+ */
+async function getVerifiedSessionUser(expectedUserId?: string): Promise<User | null> {
+  if (!supabase) return null;
+  try {
+    const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+    if (sessionError || !session?.access_token || !session?.user) {
+      return null;
+    }
+    if (expectedUserId && session.user.id !== expectedUserId) {
+      console.warn('[Supabase RLS Guard] ID do usuário diverge da sessão autenticada ativa.');
+      return null;
+    }
+    return session.user;
+  } catch {
+    return null;
+  }
+}
+
 export async function getCurrentAuthUser(): Promise<User | null> {
   if (!supabase) return null;
   try {
@@ -231,6 +293,12 @@ export async function getCurrentAuthUser(): Promise<User | null> {
     return null;
   }
 }
+
+export const PROVISIONAL_CREDENTIALS = {
+  email: 'acesso.dividazero@gmail.com',
+  password: 'DividaZero@2026',
+  name: 'Oziel Souza',
+};
 
 export async function signInWithEmail(email: string, password: string) {
   if (!supabase) throw new Error('Supabase não está configurado. Configure as variáveis de ambiente.');
@@ -254,6 +322,86 @@ export async function signUpWithEmail(email: string, password: string, name?: st
   return data;
 }
 
+export async function updateUserCredentials(params: {
+  newEmail?: string;
+  newPassword?: string;
+  currentEmail?: string;
+}): Promise<{ emailUpdated: boolean; passwordUpdated: boolean; message: string }> {
+  const cleanEmail = params.newEmail?.trim().toLowerCase();
+  const cleanPassword = params.newPassword?.trim();
+
+  if (!cleanEmail && !cleanPassword) {
+    throw new Error('Informe um novo e-mail ou uma nova senha para atualizar.');
+  }
+
+  if (cleanPassword && cleanPassword.length < 6) {
+    throw new Error('A nova senha deve ter no mínimo 6 caracteres.');
+  }
+
+  // Check if user is authenticated in Supabase
+  const verifiedUser = await getVerifiedSessionUser();
+  if (!supabase || !verifiedUser) {
+    // Local profile update fallback if not connected to cloud yet
+    return {
+      emailUpdated: Boolean(cleanEmail),
+      passwordUpdated: Boolean(cleanPassword),
+      message: 'Credenciais locais atualizadas no perfil deste dispositivo. Conecte-se à nuvem para sincronizar no Supabase Auth.',
+    };
+  }
+
+  let emailUpdated = false;
+  let passwordUpdated = false;
+  const messages: string[] = [];
+
+  // 1. Update password if provided
+  if (cleanPassword) {
+    const { error: pwdError } = await supabase.auth.updateUser({
+      password: cleanPassword,
+    });
+    if (pwdError) {
+      throw new Error(`Erro ao atualizar senha no Supabase: ${pwdError.message}`);
+    }
+    passwordUpdated = true;
+    messages.push('Senha atualizada com sucesso na nuvem!');
+  }
+
+  // 2. Update email if provided and changed
+  if (cleanEmail && cleanEmail !== (verifiedUser.email || '').toLowerCase()) {
+    // Try direct RPC first (if user installed the instant email change helper)
+    const { error: rpcError } = await supabase.rpc('update_my_email_direct', {
+      new_email: cleanEmail,
+    });
+
+    if (!rpcError) {
+      await supabase.auth.refreshSession();
+      emailUpdated = true;
+      messages.push(`E-mail alterado imediatamente para ${cleanEmail}!`);
+    } else {
+      // Standard Supabase Auth updateUser
+      const { error: emailError } = await supabase.auth.updateUser({
+        email: cleanEmail,
+      });
+      if (emailError) {
+        throw new Error(`Erro ao solicitar troca de e-mail: ${emailError.message}`);
+      }
+      // Also update public.profiles email so UI reflects the target email
+      await supabase
+        .from('profiles')
+        .update({ email: cleanEmail, updated_at: new Date().toISOString() })
+        .eq('id', verifiedUser.id);
+
+      emailUpdated = true;
+      messages.push(`E-mail atualizado para ${cleanEmail} (caso o Supabase exija confirmação por link, verifique sua caixa de entrada).`);
+    }
+  }
+
+  return {
+    emailUpdated,
+    passwordUpdated,
+    message: messages.join(' ') || 'Dados de acesso atualizados com sucesso!',
+  };
+}
+
 export async function signOutUser() {
   if (!supabase) return;
   const { error } = await supabase.auth.signOut();
@@ -267,14 +415,19 @@ export async function signOutUser() {
 export async function fetchCloudProfile(userId: string): Promise<UserProfile | null> {
   if (!supabase) return null;
   try {
+    const verifiedUser = await getVerifiedSessionUser(userId);
+    if (!verifiedUser) return null;
+
     const { data, error } = await supabase
       .from('profiles')
       .select('*')
-      .eq('id', userId)
+      .eq('id', verifiedUser.id)
       .maybeSingle();
 
     if (error) {
-      console.warn('Error fetching cloud profile:', error.message);
+      if (error.code !== 'PGRST205' && error.code !== '42P01') {
+        console.warn('Error fetching cloud profile:', error.message);
+      }
       return null;
     }
 
@@ -309,20 +462,26 @@ export async function fetchCloudProfile(userId: string): Promise<UserProfile | n
 export async function saveCloudProfile(profile: UserProfile, userId: string): Promise<boolean> {
   if (!supabase) return false;
   try {
+    const verifiedUser = await getVerifiedSessionUser(userId);
+    if (!verifiedUser) return false;
+
     const { error } = await supabase
       .from('profiles')
-      .upsert({
-        id: userId,
-        name: profile.name,
-        email: profile.email,
-        avatar_url: profile.avatarUrl || null,
-        currency: profile.currency,
-        hide_values_on_dashboard: profile.hideValuesOnDashboard,
-        allow_ai_data_analysis: profile.allowAiDataAnalysis,
-        biometric_lock: profile.biometricLock,
-        notification_preferences: profile.notificationPreferences,
-        updated_at: new Date().toISOString(),
-      });
+      .upsert(
+        {
+          id: verifiedUser.id,
+          name: profile.name,
+          email: verifiedUser.email || profile.email,
+          avatar_url: profile.avatarUrl || null,
+          currency: profile.currency,
+          hide_values_on_dashboard: profile.hideValuesOnDashboard,
+          allow_ai_data_analysis: profile.allowAiDataAnalysis,
+          biometric_lock: profile.biometricLock,
+          notification_preferences: profile.notificationPreferences,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'id' }
+      );
 
     if (error) {
       console.error('Error saving cloud profile:', error.message);
@@ -380,19 +539,24 @@ function buildGoalFingerprint(g: { title: string; targetPayoffDate: string }): s
 export async function fetchCloudDebts(userId: string): Promise<DebtItem[] | null> {
   if (!supabase) return null;
   try {
+    const verifiedUser = await getVerifiedSessionUser(userId);
+    if (!verifiedUser) return null;
+
     const { data, error } = await supabase
       .from('debts')
       .select('*')
-      .eq('user_id', userId)
+      .eq('user_id', verifiedUser.id)
       .order('created_at', { ascending: false });
 
     if (error) {
-      console.error('Error fetching cloud debts:', error.message);
+      if (error.code !== 'PGRST205' && error.code !== '42P01') {
+        console.error('Error fetching cloud debts:', error.message);
+      }
       return null;
     }
 
     return (data || []).map((row: any) => ({
-      id: fromCloudScopedId(userId, String(row.id)),
+      id: fromCloudScopedId(verifiedUser.id, String(row.id)),
       title: row.title,
       creditor: row.creditor,
       category: row.category,
@@ -414,25 +578,36 @@ export async function fetchCloudDebts(userId: string): Promise<DebtItem[] | null
 export async function saveCloudDebt(debt: DebtItem, userId: string): Promise<boolean> {
   if (!supabase) return false;
   try {
-    const scopedId = toCloudScopedId(userId, debt.id);
-    const { error } = await supabase
+    const verifiedUser = await getVerifiedSessionUser(userId);
+    if (!verifiedUser) return false;
+
+    const scopedId = toCloudScopedId(verifiedUser.id, debt.id);
+    const payload = {
+      id: scopedId,
+      user_id: verifiedUser.id,
+      title: debt.title,
+      creditor: debt.creditor,
+      category: debt.category,
+      total_amount: debt.totalAmount,
+      remaining_amount: debt.remainingAmount,
+      monthly_payment: debt.monthlyPayment,
+      due_date: debt.dueDate,
+      status: debt.status,
+      installments_total: debt.installmentsTotal,
+      installments_paid: debt.installmentsPaid,
+      interest_rate: debt.interestRate,
+      updated_at: new Date().toISOString(),
+    };
+
+    let { error } = await supabase
       .from('debts')
-      .upsert({
-        id: scopedId,
-        user_id: userId,
-        title: debt.title,
-        creditor: debt.creditor,
-        category: debt.category,
-        total_amount: debt.totalAmount,
-        remaining_amount: debt.remainingAmount,
-        monthly_payment: debt.monthlyPayment,
-        due_date: debt.dueDate,
-        status: debt.status,
-        installments_total: debt.installmentsTotal,
-        installments_paid: debt.installmentsPaid,
-        interest_rate: debt.interestRate,
-        updated_at: new Date().toISOString(),
-      });
+      .upsert(payload, { onConflict: 'user_id,id' });
+
+    // Fallback if remote table uses single-column PK (id) without composite unique constraint
+    if (error && error.code === '42P10') {
+      const retry = await supabase.from('debts').upsert(payload, { onConflict: 'id' });
+      error = retry.error;
+    }
 
     if (error) {
       console.error('Error saving debt to Supabase:', error.message);
@@ -448,12 +623,15 @@ export async function saveCloudDebt(debt: DebtItem, userId: string): Promise<boo
 export async function deleteCloudDebt(debtId: string, userId: string): Promise<boolean> {
   if (!supabase) return false;
   try {
-    const scopedId = toCloudScopedId(userId, debtId);
+    const verifiedUser = await getVerifiedSessionUser(userId);
+    if (!verifiedUser) return false;
+
+    const scopedId = toCloudScopedId(verifiedUser.id, debtId);
     const { error } = await supabase
       .from('debts')
       .delete()
       .in('id', [debtId, scopedId])
-      .eq('user_id', userId);
+      .eq('user_id', verifiedUser.id);
 
     if (error) {
       console.error('Error deleting debt from Supabase:', error.message);

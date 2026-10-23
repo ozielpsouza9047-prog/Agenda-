@@ -20,6 +20,7 @@ import {
   SUPABASE_CONFIG,
   testSupabaseConnection,
   SupabaseDiagnostics,
+  PROVISIONAL_CREDENTIALS,
 } from '../lib/supabase';
 
 interface SupabaseAuthModalProps {
@@ -63,7 +64,7 @@ export const SupabaseAuthModal: React.FC<SupabaseAuthModalProps> = ({
   };
 
   const handleCopySql = () => {
-    const sql = `-- Dívida Zero AI - Supabase Schema with RLS
+    const sql = `-- Dívida Zero AI - Supabase Schema with RLS (Zero-DROP)
 create extension if not exists "uuid-ossp";
 
 -- 1. Profiles
@@ -77,14 +78,14 @@ create table if not exists public.profiles (
   hide_values_on_dashboard boolean not null default false,
   allow_ai_data_analysis boolean not null default true,
   biometric_lock boolean not null default false,
-  notification_preferences jsonb not null default '{"enabled": true}'::jsonb,
+  notification_preferences jsonb not null default '{"enabled": true, "notify7Days": true, "notify3Days": true, "notify1Day": true, "notifyDueDay": true, "notifyOverdue": true, "emailSummary": false}'::jsonb,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null,
   updated_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 
 -- 2. Debts
 create table if not exists public.debts (
-  id text primary key,
+  id text not null,
   user_id uuid not null references auth.users(id) on delete cascade,
   title text not null,
   creditor text not null,
@@ -98,51 +99,59 @@ create table if not exists public.debts (
   installments_paid integer not null default 0,
   interest_rate numeric(6, 2) not null default 0,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-  updated_at timestamp with time zone default timezone('utc'::text, now()) not null
+  updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  primary key (user_id, id)
 );
 
 -- 3. Installments
 create table if not exists public.installments (
-  id text primary key,
-  debt_id text not null references public.debts(id) on delete cascade,
+  id text not null,
+  debt_id text not null,
   user_id uuid not null references auth.users(id) on delete cascade,
   installment_number integer not null,
-  amount numeric(12, 2) not null,
+  amount numeric(12, 2) not null default 0,
   due_date text not null,
   status text not null default 'pendente',
   paid_at timestamp with time zone,
-  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  primary key (user_id, id),
+  foreign key (user_id, debt_id) references public.debts(user_id, id) on delete cascade
 );
 
 -- 4. Payments
 create table if not exists public.payments (
-  id text primary key,
-  debt_id text not null references public.debts(id) on delete cascade,
+  id text not null,
+  debt_id text not null,
   user_id uuid not null references auth.users(id) on delete cascade,
-  amount numeric(12, 2) not null,
+  amount numeric(12, 2) not null default 0,
   payment_date text not null,
   payment_type text not null default 'regular',
   receipt_url text,
-  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  primary key (user_id, id),
+  foreign key (user_id, debt_id) references public.debts(user_id, id) on delete cascade
 );
 
 -- 5. Goals
 create table if not exists public.goals (
-  id text primary key,
+  id text not null,
   user_id uuid not null references auth.users(id) on delete cascade,
   title text not null,
   monthly_reduction_goal numeric(12, 2) not null default 0,
   extra_payment_goal numeric(12, 2) not null default 0,
   target_payoff_date text not null,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-  updated_at timestamp with time zone default timezone('utc'::text, now()) not null
+  updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  primary key (user_id, id)
 );
 
--- Indices
-create index if not exists idx_debts_user_id on public.debts(user_id);
-create index if not exists idx_installments_user_id on public.installments(user_id);
-create index if not exists idx_payments_user_id on public.payments(user_id);
-create index if not exists idx_goals_user_id on public.goals(user_id);
+-- Permissions
+grant usage on schema public to postgres, anon, authenticated, service_role, supabase_auth_admin;
+revoke all on table public.profiles, public.debts, public.installments, public.payments, public.goals from public, anon;
+grant select, insert, update, delete on table public.profiles, public.debts, public.installments, public.payments, public.goals to authenticated;
+grant all privileges on table public.profiles, public.debts, public.installments, public.payments, public.goals to postgres, service_role, supabase_auth_admin;
 
 -- Enable RLS
 alter table public.profiles enable row level security;
@@ -151,29 +160,7 @@ alter table public.installments enable row level security;
 alter table public.payments enable row level security;
 alter table public.goals enable row level security;
 
--- Policies
-create policy "Users can view own profile" on public.profiles for select using (auth.uid() = id);
-create policy "Users can update own profile" on public.profiles for update using (auth.uid() = id) with check (auth.uid() = id);
-create policy "Users can insert own profile" on public.profiles for insert with check (auth.uid() = id);
-
-create policy "Users can manage own debts" on public.debts for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
-create policy "Users can manage own installments" on public.installments for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
-create policy "Users can manage own payments" on public.payments for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
-create policy "Users can manage own goals" on public.goals for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
-
--- Trigger for auto profile creation
-create or replace function public.handle_new_user()
-returns trigger as $$
-begin
-  insert into public.profiles (id, email, name)
-  values (new.id, new.email, coalesce(new.raw_user_meta_data->>'name', split_part(new.email, '@', 1)))
-  on conflict (id) do nothing;
-  return new;
-end;
-$$ language plpgsql security definer;
-
-drop trigger if exists on_auth_user_created on auth.users;
-create trigger on_auth_user_created after insert on auth.users for each row execute procedure public.handle_new_user();`;
+-- Veja o script completo de reconciliação com as 20 políticas RLS e trigger seguro em supabase/schema.sql`;
 
     navigator.clipboard.writeText(sql);
     setCopiedSql(true);
@@ -199,16 +186,21 @@ create trigger on_auth_user_created after insert on auth.users for each row exec
     try {
       if (mode === 'signup') {
         const res = await signUpWithEmail(email, password, name);
-        if (res.user) {
+        if (res.user && res.session) {
           setSuccessMessage('Conta criada com sucesso! Você já está autenticado.');
           setTimeout(() => {
             onAuthSuccess(email, name || email.split('@')[0]);
             onClose();
           }, 1200);
+        } else if (res.user && !res.session) {
+          setSuccessMessage(
+            'Conta registrada! Confirme seu e-mail para ativar a sessão autenticada antes de fazer login.'
+          );
+          setMode('signin');
         }
       } else {
         const res = await signInWithEmail(email, password);
-        if (res.user) {
+        if (res.user && res.session) {
           setSuccessMessage('Login efetuado com sucesso!');
           setTimeout(() => {
             onAuthSuccess(email, res.user.user_metadata?.name || email.split('@')[0]);
@@ -221,10 +213,16 @@ create trigger on_auth_user_created after insert on auth.users for each row exec
       let msg = err?.message || 'Erro ao processar autenticação.';
       if (msg.includes('Invalid login credentials')) {
         msg = 'E-mail ou senha incorretos.';
+      } else if (msg.includes('Email not confirmed')) {
+        msg = 'Seu e-mail ainda não foi confirmado. Verifique sua caixa de entrada ou desative "Confirm email" em Authentication > Providers > Email no Supabase.';
       } else if (msg.includes('User already registered')) {
-        msg = 'Este e-mail já está cadastrado. Alterne para a aba de Login.';
+        msg = 'Este e-mail já está cadastrado. Alterne para a aba de Entrar.';
       } else if (msg.includes('Password should be at least')) {
         msg = 'A senha deve conter no mínimo 6 caracteres.';
+      } else if (msg.includes('Database error saving new user')) {
+        msg = 'Erro de permissão no trigger de criação de perfil do banco. Execute o script atualizado supabase/schema.sql no SQL Editor.';
+      } else if (msg.includes('Signups not allowed')) {
+        msg = 'O cadastro de novos usuários está desativado nas configurações de Auth do Supabase.';
       }
       setErrorMessage(msg);
     } finally {
@@ -262,32 +260,52 @@ create trigger on_auth_user_created after insert on auth.users for each row exec
         {!configured ? (
           <div className="space-y-4">
             <div className={`p-4 rounded-xl border ${
-              isDark ? 'bg-purple-950/30 border-purple-800/60 text-purple-200' : 'bg-purple-50 border-purple-200 text-purple-900'
+              isDark ? 'bg-amber-950/30 border-amber-800/60 text-amber-200' : 'bg-amber-50 border-amber-200 text-amber-900'
             }`}>
               <div className="flex items-start gap-3">
-                <ShieldCheck className="w-5 h-5 text-purple-400 shrink-0 mt-0.5" />
+                <ShieldCheck className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
                 <div className="text-xs space-y-1.5">
-                  <p className="font-semibold text-sm">Status da Conexão Supabase</p>
+                  <p className="font-semibold text-sm">Configuração Pendente</p>
                   <p className="opacity-90 leading-relaxed">
-                    A URL do projeto <strong className="font-mono text-purple-300">ihjpxxlotdmxvrccbukf</strong> está conectada e acessível via Cloudflare Gateway.
+                    O projeto <strong className="font-mono text-amber-300">ihjpxxlotdmxvrccbukf</strong> está identificado, mas falta configurar uma credencial pública real do Supabase.
                   </p>
                   <p className="text-[11px] opacity-80">
-                    Para ativar a autenticação real e a persistência protegida por RLS, substitua a chave de exemplo <code className="px-1 py-0.5 rounded bg-black/20 font-mono">COLOQUE_AQUI_SUA_CHAVE_PUBLICA_SB_PUBLISHABLE</code> no arquivo <code className="font-mono text-purple-300">.env</code> pela chave pública real gerada no seu painel.
+                    A autenticação em nuvem permanece desativada até que a chave pública (<code className="px-1 py-0.5 rounded bg-black/20 font-mono">anon</code> ou <code className="px-1 py-0.5 rounded bg-black/20 font-mono">sb_publishable_</code>) seja configurada nas variáveis de ambiente. Seus dados locais continuam salvos normalmente.
                   </p>
                 </div>
               </div>
             </div>
 
-            {/* Current Config Summary */}
-            <div className={`p-4 rounded-xl border text-xs font-mono space-y-2 ${
-              isDark ? 'bg-neutral-950 border-neutral-800 text-emerald-400' : 'bg-slate-100 border-slate-200 text-emerald-700'
+            {/* Current Config Status Summary */}
+            <div className={`p-4 rounded-xl border text-xs space-y-2.5 ${
+              isDark ? 'bg-neutral-950 border-neutral-800 text-slate-300' : 'bg-slate-100 border-slate-200 text-slate-700'
             }`}>
-              <div className="flex justify-between items-center text-[11px] text-slate-400 mb-1">
-                <span>Variáveis no arquivo .env:</span>
-                <span className="text-[10px] text-amber-400">Aguardando chave pública</span>
+              <div className="flex justify-between items-center text-[11px] text-slate-400 pb-1 border-b border-neutral-800/60">
+                <span className="font-semibold">Status da Configuração</span>
+                <span className="text-[10px] text-amber-400 font-medium">Autenticação Desativada</span>
               </div>
-              <div className="break-all text-[11px]"><span className="text-slate-400">VITE_SUPABASE_URL=</span>{SUPABASE_CONFIG.url || 'https://ihjpxxlotdmxvrccbukf.supabase.co'}</div>
-              <div className="break-all text-[11px]"><span className="text-slate-400">VITE_SUPABASE_ANON_KEY=</span>{SUPABASE_CONFIG.isPlaceholder ? 'COLOQUE_AQUI_SUA_CHAVE_PUBLICA_SB_PUBLISHABLE (Pendente)' : '●●●●●●●●●●'}</div>
+              <div className="flex justify-between items-center text-[11px]">
+                <span className="text-slate-400">URL do Projeto:</span>
+                <span className={SUPABASE_CONFIG.hasUrl ? 'text-emerald-400 font-medium' : 'text-amber-400 font-medium'}>
+                  {SUPABASE_CONFIG.hasUrl ? 'Configurada (ihjpxxlotdmxvrccbukf)' : 'Pendente'}
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-[11px]">
+                <span className="text-slate-400">Chave Pública:</span>
+                <span className={
+                  SUPABASE_CONFIG.isSecretBlocked
+                    ? 'text-rose-400 font-medium'
+                    : SUPABASE_CONFIG.hasKey
+                    ? 'text-emerald-400 font-medium'
+                    : 'text-amber-400 font-medium'
+                }>
+                  {SUPABASE_CONFIG.isSecretBlocked
+                    ? 'Bloqueada (chave secreta detectada)'
+                    : SUPABASE_CONFIG.hasKey
+                    ? 'Configurada'
+                    : 'Pendente de configuração'}
+                </span>
+              </div>
             </div>
 
             {/* Security Notice */}
@@ -385,10 +403,83 @@ create trigger on_auth_user_created after insert on auth.users for each row exec
               </button>
             </div>
 
+            {/* Provisional Credentials Quick-Fill Card */}
+            {mode === 'signin' && (
+              <div className={`mb-4 p-3.5 rounded-xl border text-xs space-y-2 ${
+                isDark ? 'bg-purple-950/20 border-purple-500/30 text-purple-200' : 'bg-purple-50 border-purple-200 text-purple-900'
+              }`}>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold flex items-center gap-1.5 text-purple-400">
+                    <KeyRound className="w-3.5 h-3.5" />
+                    Acesso Provisório Disponível
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEmail(PROVISIONAL_CREDENTIALS.email);
+                      setPassword(PROVISIONAL_CREDENTIALS.password);
+                      setErrorMessage(null);
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-semibold transition-all"
+                  >
+                    Preencher Dados
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px] font-mono opacity-90 pt-0.5">
+                  <div>E-mail: <strong>{PROVISIONAL_CREDENTIALS.email}</strong></div>
+                  <div>Senha: <strong>{PROVISIONAL_CREDENTIALS.password}</strong></div>
+                </div>
+                <p className="text-[10px] opacity-75">
+                  Após entrar, você pode trocar o e-mail e a senha diretamente na aba <strong>Meu Perfil</strong>.
+                </p>
+              </div>
+            )}
+
             {errorMessage && (
-              <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>{errorMessage}</span>
+              <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs space-y-2">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{errorMessage}</span>
+                </div>
+                {errorMessage.includes('confirmado') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const confirmSql = `-- Confirma imediatamente a conta provisória e habilita troca de e-mail direta pelo app
+UPDATE auth.users SET email_confirmed_at = now() WHERE email = '${PROVISIONAL_CREDENTIALS.email}';
+
+CREATE OR REPLACE FUNCTION public.update_my_email_direct(new_email text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, auth
+AS $$
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'Não autenticado';
+  END IF;
+  UPDATE auth.users
+  SET email = lower(trim(new_email)),
+      email_confirmed_at = now(),
+      updated_at = now()
+  WHERE id = auth.uid();
+  UPDATE public.profiles
+  SET email = lower(trim(new_email)),
+      updated_at = now()
+  WHERE id = auth.uid();
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.update_my_email_direct(text) TO authenticated;`;
+                      navigator.clipboard.writeText(confirmSql);
+                      setCopiedSql(true);
+                      setTimeout(() => setCopiedSql(false), 3000);
+                    }}
+                    className="w-full py-2 px-3 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 font-semibold flex items-center justify-center gap-1.5 transition-all"
+                  >
+                    {copiedSql ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedSql ? 'SQL de Liberação Copiado! Cole no SQL Editor' : 'Copiar SQL de Liberação Imediata'}</span>
+                  </button>
+                )}
               </div>
             )}
 
