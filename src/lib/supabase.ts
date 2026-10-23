@@ -1,10 +1,10 @@
 import { createClient, SupabaseClient, User } from '@supabase/supabase-js';
-import { DebtItem, UserProfile } from '../types';
+import { DebtItem, GoalItem, UserProfile } from '../types';
 
 // Retrieve environment variables with fallback (isomorphic for Vite browser and Node/testing)
 const env = typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env : (typeof process !== 'undefined' ? process.env : {});
-const supabaseUrl = (env.VITE_SUPABASE_URL || '').trim();
-const supabaseAnonKey = (env.VITE_SUPABASE_ANON_KEY || '').trim();
+const supabaseUrl = (env.VITE_SUPABASE_URL || 'https://ihjpxxlotdmxvrccbukf.supabase.co').trim();
+const supabaseAnonKey = (env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_rb7DK-hVidb3_zgYFE00jw_3GcU2BgI').trim();
 
 /**
  * Checks if a provided key is a secret service_role key.
@@ -336,6 +336,44 @@ export async function saveCloudProfile(profile: UserProfile, userId: string): Pr
 }
 
 // ==========================================
+// USER-SCOPED ID NORMALIZATION (PREVENTS CROSS-USER SHORT ID COLLISIONS)
+// Local IDs ('1', '2', 'goal-1') remain untouched in localStorage.
+// In Supabase, IDs are deterministically scoped as `${userId}:${localId}`.
+// ==========================================
+
+export function toCloudScopedId(userId: string, localId: string): string {
+  const cleanUser = (userId || '').trim();
+  const cleanId = String(localId || '').trim();
+  if (!cleanUser || !cleanId) return cleanId;
+  const prefix = `${cleanUser}:`;
+  return cleanId.startsWith(prefix) ? cleanId : `${prefix}${cleanId}`;
+}
+
+export function fromCloudScopedId(userId: string, cloudId: string): string {
+  const cleanUser = (userId || '').trim();
+  const cleanId = String(cloudId || '').trim();
+  if (!cleanUser || !cleanId) return cleanId;
+  const prefix = `${cleanUser}:`;
+  return cleanId.startsWith(prefix) ? cleanId.slice(prefix.length) : cleanId;
+}
+
+function buildDebtFingerprint(d: { title: string; creditor: string; dueDate: string; totalAmount: number }): string {
+  return [
+    (d.title || '').trim().toLowerCase(),
+    (d.creditor || '').trim().toLowerCase(),
+    (d.dueDate || '').trim(),
+    Number(d.totalAmount || 0).toFixed(2),
+  ].join('|');
+}
+
+function buildGoalFingerprint(g: { title: string; targetPayoffDate: string }): string {
+  return [
+    (g.title || '').trim().toLowerCase(),
+    (g.targetPayoffDate || '').trim(),
+  ].join('|');
+}
+
+// ==========================================
 // DEBTS CRUD (RLS PROTECTED)
 // ==========================================
 
@@ -354,7 +392,7 @@ export async function fetchCloudDebts(userId: string): Promise<DebtItem[] | null
     }
 
     return (data || []).map((row: any) => ({
-      id: String(row.id),
+      id: fromCloudScopedId(userId, String(row.id)),
       title: row.title,
       creditor: row.creditor,
       category: row.category,
@@ -376,10 +414,11 @@ export async function fetchCloudDebts(userId: string): Promise<DebtItem[] | null
 export async function saveCloudDebt(debt: DebtItem, userId: string): Promise<boolean> {
   if (!supabase) return false;
   try {
+    const scopedId = toCloudScopedId(userId, debt.id);
     const { error } = await supabase
       .from('debts')
       .upsert({
-        id: debt.id,
+        id: scopedId,
         user_id: userId,
         title: debt.title,
         creditor: debt.creditor,
@@ -409,10 +448,11 @@ export async function saveCloudDebt(debt: DebtItem, userId: string): Promise<boo
 export async function deleteCloudDebt(debtId: string, userId: string): Promise<boolean> {
   if (!supabase) return false;
   try {
+    const scopedId = toCloudScopedId(userId, debtId);
     const { error } = await supabase
       .from('debts')
       .delete()
-      .eq('id', debtId)
+      .in('id', [debtId, scopedId])
       .eq('user_id', userId);
 
     if (error) {
@@ -428,82 +468,364 @@ export async function deleteCloudDebt(debtId: string, userId: string): Promise<b
 
 // ==========================================
 // SAFE DATA MIGRATION FROM LOCALSTORAGE
-// Never deletes or overwrites automatically. Checks existing IDs to avoid duplicate rows.
+// Never deletes or overwrites automatically. Validates session, schema, and permissions first.
 // ==========================================
+
+export interface RecordMigrationReport {
+  type: 'debt' | 'goal';
+  localId: string;
+  cloudId: string;
+  title: string;
+  status: 'imported' | 'skipped' | 'failed';
+  detail: string;
+}
+
+export interface MigrationPreview {
+  ready: boolean;
+  blockingError: string | null;
+  missingTables: string[];
+  verifiedUserId: string | null;
+  verifiedUserEmail: string | null;
+  debtsTotalLocal: number;
+  debtsToImport: DebtItem[];
+  debtsAlreadyInCloud: DebtItem[];
+  goalsTotalLocal: number;
+  goalsToImport: GoalItem[];
+  goalsAlreadyInCloud: GoalItem[];
+}
 
 export interface MigrationResult {
   totalFound: number;
   migrated: number;
   skipped: number;
+  failed: number;
+  hasErrors: boolean;
   errors: string[];
+  records: RecordMigrationReport[];
 }
 
-export async function migrateLocalDebtsToSupabase(
+/**
+ * Step 1: Read-only pre-validation and preview before any migration write.
+ * Verifies active authenticated session, table existence ('profiles', 'debts', 'goals'),
+ * RLS read permissions, and calculates exact new vs. already-migrated items.
+ */
+export async function prepareLocalMigrationPreview(
   localDebts: DebtItem[],
-  userId: string
-): Promise<MigrationResult> {
-  const result: MigrationResult = {
-    totalFound: localDebts.length,
-    migrated: 0,
-    skipped: 0,
-    errors: [],
+  localGoals: GoalItem[],
+  expectedUserId: string
+): Promise<MigrationPreview> {
+  const preview: MigrationPreview = {
+    ready: false,
+    blockingError: null,
+    missingTables: [],
+    verifiedUserId: null,
+    verifiedUserEmail: null,
+    debtsTotalLocal: localDebts.length,
+    debtsToImport: [],
+    debtsAlreadyInCloud: [],
+    goalsTotalLocal: localGoals.length,
+    goalsToImport: [],
+    goalsAlreadyInCloud: [],
   };
 
-  if (!supabase) {
-    result.errors.push('Supabase não está configurado.');
-    return result;
+  if (!supabase || !isSupabaseConfigured()) {
+    preview.blockingError = 'O cliente Supabase não está configurado. Verifique as variáveis de ambiente.';
+    return preview;
   }
 
   try {
-    // 1. Fetch current debts in Supabase to verify which IDs already exist
-    const { data: existingRows, error: fetchErr } = await supabase
+    // 1. Validate active authenticated session and confirm user identity matches
+    const { data: { session }, error: sessionErr } = await supabase.auth.getSession();
+    if (sessionErr || !session?.user) {
+      preview.blockingError = 'Sessão de autenticação inválida ou expirada. Faça login novamente antes de migrar.';
+      return preview;
+    }
+
+    const { data: { user }, error: userErr } = await supabase.auth.getUser();
+    if (userErr || !user || user.id !== expectedUserId) {
+      preview.blockingError = 'Não foi possível confirmar a identidade do usuário autenticado na sessão atual.';
+      return preview;
+    }
+
+    preview.verifiedUserId = user.id;
+    preview.verifiedUserEmail = user.email || null;
+
+    // 2. Check required remote tables ('profiles', 'debts', 'goals') and RLS read permission
+    const requiredTables = ['profiles', 'debts', 'goals'] as const;
+    for (const table of requiredTables) {
+      const filterCol = table === 'profiles' ? 'id' : 'user_id';
+      const { error: probeErr } = await supabase
+        .from(table)
+        .select('id')
+        .eq(filterCol, user.id)
+        .limit(1);
+
+      if (probeErr) {
+        if (probeErr.code === 'PGRST205' || probeErr.code === '42P01' || probeErr.message?.includes('schema cache')) {
+          preview.missingTables.push(table);
+        } else if (probeErr.code === '42501' || probeErr.message?.includes('permission denied') || probeErr.message?.includes('row-level security')) {
+          preview.blockingError = `Erro de permissão RLS ao consultar a tabela "${table}" (${probeErr.code || '42501'}): ${probeErr.message}`;
+          return preview;
+        } else {
+          preview.blockingError = `Falha ao validar a tabela "${table}" no Supabase (${probeErr.code || 'erro'}): ${probeErr.message}`;
+          return preview;
+        }
+      }
+    }
+
+    if (preview.missingTables.length > 0) {
+      preview.blockingError = `O schema remoto no Supabase ainda não está pronto. Tabelas ausentes: ${preview.missingTables.join(', ')}. Execute primeiro o script supabase/schema.sql no SQL Editor do Supabase antes de iniciar a migração.`;
+      return preview;
+    }
+
+    // 3. Inspect existing debts for this authenticated user to avoid duplicates
+    const { data: existingDebtRows, error: debtFetchErr } = await supabase
       .from('debts')
-      .select('id, title, creditor')
-      .eq('user_id', userId);
+      .select('id, title, creditor, due_date, total_amount')
+      .eq('user_id', user.id);
 
-    if (fetchErr) {
-      result.errors.push(`Erro ao verificar dados existentes na nuvem: ${fetchErr.message}`);
-      return result;
+    if (debtFetchErr) {
+      preview.blockingError = `Erro ao consultar dívidas existentes do usuário: ${debtFetchErr.message}`;
+      return preview;
     }
 
-    const existingIds = new Set((existingRows || []).map((r: any) => String(r.id)));
+    const existingDebtIds = new Set<string>();
+    const existingDebtFingerprints = new Set<string>();
+    for (const row of existingDebtRows || []) {
+      const rawId = String(row.id);
+      existingDebtIds.add(rawId);
+      existingDebtIds.add(fromCloudScopedId(user.id, rawId));
+      existingDebtFingerprints.add(
+        buildDebtFingerprint({
+          title: row.title,
+          creditor: row.creditor,
+          dueDate: row.due_date,
+          totalAmount: Number(row.total_amount) || 0,
+        })
+      );
+    }
 
-    // 2. Insert only debts that don't already exist in the user's Supabase storage
+    const seenLocalDebtKeys = new Set<string>();
     for (const debt of localDebts) {
-      if (existingIds.has(debt.id)) {
-        result.skipped += 1;
-        continue;
-      }
-
-      const { error: insertErr } = await supabase
-        .from('debts')
-        .insert({
-          id: debt.id,
-          user_id: userId,
-          title: debt.title,
-          creditor: debt.creditor,
-          category: debt.category,
-          total_amount: debt.totalAmount,
-          remaining_amount: debt.remainingAmount,
-          monthly_payment: debt.monthlyPayment,
-          due_date: debt.dueDate,
-          status: debt.status,
-          installments_total: debt.installmentsTotal,
-          installments_paid: debt.installmentsPaid,
-          interest_rate: debt.interestRate,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        });
-
-      if (insertErr) {
-        result.errors.push(`Falha ao migrar "${debt.title}": ${insertErr.message}`);
+      const scopedId = toCloudScopedId(user.id, debt.id);
+      const fp = buildDebtFingerprint(debt);
+      if (
+        existingDebtIds.has(debt.id) ||
+        existingDebtIds.has(scopedId) ||
+        existingDebtFingerprints.has(fp) ||
+        seenLocalDebtKeys.has(scopedId) ||
+        seenLocalDebtKeys.has(fp)
+      ) {
+        preview.debtsAlreadyInCloud.push(debt);
       } else {
-        result.migrated += 1;
+        seenLocalDebtKeys.add(scopedId);
+        seenLocalDebtKeys.add(fp);
+        preview.debtsToImport.push(debt);
       }
     }
+
+    // 4. Inspect existing goals for this authenticated user to avoid duplicates
+    const { data: existingGoalRows, error: goalFetchErr } = await supabase
+      .from('goals')
+      .select('id, title, target_payoff_date')
+      .eq('user_id', user.id);
+
+    if (goalFetchErr) {
+      preview.blockingError = `Erro ao consultar metas existentes do usuário: ${goalFetchErr.message}`;
+      return preview;
+    }
+
+    const existingGoalIds = new Set<string>();
+    const existingGoalFingerprints = new Set<string>();
+    for (const row of existingGoalRows || []) {
+      const rawId = String(row.id);
+      existingGoalIds.add(rawId);
+      existingGoalIds.add(fromCloudScopedId(user.id, rawId));
+      existingGoalFingerprints.add(
+        buildGoalFingerprint({
+          title: row.title,
+          targetPayoffDate: row.target_payoff_date,
+        })
+      );
+    }
+
+    const seenLocalGoalKeys = new Set<string>();
+    for (const goal of localGoals) {
+      const scopedId = toCloudScopedId(user.id, goal.id);
+      const fp = buildGoalFingerprint(goal);
+      if (
+        existingGoalIds.has(goal.id) ||
+        existingGoalIds.has(scopedId) ||
+        existingGoalFingerprints.has(fp) ||
+        seenLocalGoalKeys.has(scopedId) ||
+        seenLocalGoalKeys.has(fp)
+      ) {
+        preview.goalsAlreadyInCloud.push(goal);
+      } else {
+        seenLocalGoalKeys.add(scopedId);
+        seenLocalGoalKeys.add(fp);
+        preview.goalsToImport.push(goal);
+      }
+    }
+
+    preview.ready = true;
+    return preview;
   } catch (err: any) {
-    result.errors.push(`Erro inesperado durante a migração: ${err?.message || err}`);
+    preview.blockingError = `Erro inesperado ao validar prévia da migração: ${err?.message || err}`;
+    return preview;
+  }
+}
+
+/**
+ * Step 2: Executes the confirmed migration of local debts and goals for the authenticated user.
+ * Never deletes or modifies localStorage. Reports status per record and never declares success on error.
+ */
+export async function migrateLocalDebtsToSupabase(
+  localDebts: DebtItem[],
+  userId: string,
+  localGoals: GoalItem[] = []
+): Promise<MigrationResult> {
+  const result: MigrationResult = {
+    totalFound: localDebts.length + localGoals.length,
+    migrated: 0,
+    skipped: 0,
+    failed: 0,
+    hasErrors: false,
+    errors: [],
+    records: [],
+  };
+
+  // Run full readiness and preview verification before writing anything
+  const preview = await prepareLocalMigrationPreview(localDebts, localGoals, userId);
+  if (!preview.ready || !preview.verifiedUserId) {
+    const errMsg = preview.blockingError || 'A validação prévia da migração falhou.';
+    result.errors.push(errMsg);
+    result.hasErrors = true;
+    return result;
   }
 
+  const verifiedUserId = preview.verifiedUserId;
+
+  // Record skipped debts
+  for (const skippedDebt of preview.debtsAlreadyInCloud) {
+    result.skipped += 1;
+    result.records.push({
+      type: 'debt',
+      localId: skippedDebt.id,
+      cloudId: toCloudScopedId(verifiedUserId, skippedDebt.id),
+      title: skippedDebt.title,
+      status: 'skipped',
+      detail: 'Já existente na nuvem para este usuário (mantido sem duplicar).',
+    });
+  }
+
+  // Record skipped goals
+  for (const skippedGoal of preview.goalsAlreadyInCloud) {
+    result.skipped += 1;
+    result.records.push({
+      type: 'goal',
+      localId: skippedGoal.id,
+      cloudId: toCloudScopedId(verifiedUserId, skippedGoal.id),
+      title: skippedGoal.title,
+      status: 'skipped',
+      detail: 'Meta já existente na nuvem para este usuário (mantida sem duplicar).',
+    });
+  }
+
+  // Import only new debts with user-scoped ID
+  for (const debt of preview.debtsToImport) {
+    const cloudId = toCloudScopedId(verifiedUserId, debt.id);
+    const nowIso = new Date().toISOString();
+
+    const { error: insertErr } = await supabase!
+      .from('debts')
+      .insert({
+        id: cloudId,
+        user_id: verifiedUserId,
+        title: debt.title,
+        creditor: debt.creditor,
+        category: debt.category,
+        total_amount: debt.totalAmount,
+        remaining_amount: debt.remainingAmount,
+        monthly_payment: debt.monthlyPayment,
+        due_date: debt.dueDate,
+        status: debt.status,
+        installments_total: debt.installmentsTotal,
+        installments_paid: debt.installmentsPaid,
+        interest_rate: debt.interestRate,
+        created_at: nowIso,
+        updated_at: nowIso,
+      });
+
+    if (insertErr) {
+      result.failed += 1;
+      const errDetail = `Falha ao importar dívida "${debt.title}" (${insertErr.code || 'erro'}): ${insertErr.message}`;
+      result.errors.push(errDetail);
+      result.records.push({
+        type: 'debt',
+        localId: debt.id,
+        cloudId,
+        title: debt.title,
+        status: 'failed',
+        detail: `${insertErr.code || 'Erro'}: ${insertErr.message}`,
+      });
+    } else {
+      result.migrated += 1;
+      result.records.push({
+        type: 'debt',
+        localId: debt.id,
+        cloudId,
+        title: debt.title,
+        status: 'imported',
+        detail: 'Importada com sucesso e vinculada ao usuário autenticado.',
+      });
+    }
+  }
+
+  // Import only new goals with user-scoped ID
+  for (const goal of preview.goalsToImport) {
+    const cloudId = toCloudScopedId(verifiedUserId, goal.id);
+    const nowIso = new Date().toISOString();
+
+    const { error: insertErr } = await supabase!
+      .from('goals')
+      .insert({
+        id: cloudId,
+        user_id: verifiedUserId,
+        title: goal.title,
+        monthly_reduction_goal: goal.monthlyReductionGoal,
+        extra_payment_goal: goal.extraPaymentGoal,
+        target_payoff_date: goal.targetPayoffDate,
+        created_at: nowIso,
+        updated_at: nowIso,
+      });
+
+    if (insertErr) {
+      result.failed += 1;
+      const errDetail = `Falha ao importar meta "${goal.title}" (${insertErr.code || 'erro'}): ${insertErr.message}`;
+      result.errors.push(errDetail);
+      result.records.push({
+        type: 'goal',
+        localId: goal.id,
+        cloudId,
+        title: goal.title,
+        status: 'failed',
+        detail: `${insertErr.code || 'Erro'}: ${insertErr.message}`,
+      });
+    } else {
+      result.migrated += 1;
+      result.records.push({
+        type: 'goal',
+        localId: goal.id,
+        cloudId,
+        title: goal.title,
+        status: 'imported',
+        detail: 'Meta importada com sucesso e vinculada ao usuário autenticado.',
+      });
+    }
+  }
+
+  result.hasErrors = result.failed > 0 || result.errors.length > 0;
   return result;
 }
+

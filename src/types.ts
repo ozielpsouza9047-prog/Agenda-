@@ -45,4 +45,13 @@ export interface UserProfile {
   };
 }
 
+export interface GoalItem {
+  id: string;
+  title: string;
+  monthlyReductionGoal: number;
+  extraPaymentGoal: number;
+  targetPayoffDate: string;
+  createdAt: string;
+}
+
 export type ActiveTab = 'dashboard' | 'debts' | 'forecast' | 'reports' | 'planner' | 'goals' | 'ai_advisor' | 'profile' | 'settings';

@@ -1,19 +1,23 @@
 import React, { useState } from 'react';
 import {
-  Cloud,
-  CloudCheck,
   CloudOff,
   RefreshCw,
-  ArrowRight,
   Database,
   ShieldCheck,
   CheckCircle2,
   AlertCircle,
   Loader2,
-  Lock
+  X,
+  FileCheck2
 } from 'lucide-react';
-import { DebtItem } from '../types';
-import { migrateLocalDebtsToSupabase, isSupabaseConfigured } from '../lib/supabase';
+import { DebtItem, GoalItem } from '../types';
+import {
+  prepareLocalMigrationPreview,
+  migrateLocalDebtsToSupabase,
+  isSupabaseConfigured,
+  MigrationPreview,
+  MigrationResult,
+} from '../lib/supabase';
 import { User } from '@supabase/supabase-js';
 
 interface SupabaseSyncBannerProps {
@@ -31,54 +35,89 @@ export const SupabaseSyncBanner: React.FC<SupabaseSyncBannerProps> = ({
   onOpenAuthModal,
   onRefreshCloudData,
 }) => {
+  const [isCheckingPreview, setIsCheckingPreview] = useState(false);
   const [isMigrating, setIsMigrating] = useState(false);
-  const [migrationStatus, setMigrationStatus] = useState<{
-    success: boolean;
-    message: string;
-  } | null>(null);
+  const [previewData, setPreviewData] = useState<MigrationPreview | null>(null);
+  const [migrationReport, setMigrationReport] = useState<MigrationResult | null>(null);
+  const [blockingAlert, setBlockingAlert] = useState<string | null>(null);
 
   const configured = isSupabaseConfigured();
 
-  const handleMigrate = async () => {
+  const readLocalRecords = (): { localDebts: DebtItem[]; localGoals: GoalItem[] } => {
+    let localDebts: DebtItem[] = debts;
+    const rawDebts = localStorage.getItem('divida_zero_debts');
+    if (rawDebts) {
+      try {
+        const parsed = JSON.parse(rawDebts);
+        if (Array.isArray(parsed)) localDebts = parsed;
+      } catch (e) {
+        console.error('Erro ao ler divida_zero_debts do localStorage:', e);
+      }
+    }
+
+    let localGoals: GoalItem[] = [];
+    const rawGoals = localStorage.getItem('divida_zero_goals');
+    if (rawGoals) {
+      try {
+        const parsed = JSON.parse(rawGoals);
+        if (Array.isArray(parsed)) localGoals = parsed;
+      } catch (e) {
+        console.error('Erro ao ler divida_zero_goals do localStorage:', e);
+      }
+    }
+
+    return { localDebts, localGoals };
+  };
+
+  // Step 1: Validate session, remote schema & permissions, and show preview before any write
+  const handlePreparePreview = async () => {
     if (!authUser) {
       onOpenAuthModal();
       return;
     }
 
-    setIsMigrating(true);
-    setMigrationStatus(null);
+    setIsCheckingPreview(true);
+    setBlockingAlert(null);
+    setPreviewData(null);
+    setMigrationReport(null);
 
     try {
-      // Retrieve debts from localStorage directly to guarantee we have all local records
-      let localDebtsToMigrate: DebtItem[] = debts;
-      const rawSaved = localStorage.getItem('divida_zero_debts');
-      if (rawSaved) {
-        try {
-          localDebtsToMigrate = JSON.parse(rawSaved);
-        } catch (e) {
-          console.error(e);
-        }
-      }
+      const { localDebts, localGoals } = readLocalRecords();
+      const preview = await prepareLocalMigrationPreview(localDebts, localGoals, authUser.id);
 
-      const res = await migrateLocalDebtsToSupabase(localDebtsToMigrate, authUser.id);
-      
-      if (res.errors.length > 0 && res.migrated === 0) {
-        setMigrationStatus({
-          success: false,
-          message: `Erro na migração: ${res.errors.join('; ')}`,
-        });
+      if (!preview.ready) {
+        setBlockingAlert(
+          preview.blockingError ||
+            'Não foi possível validar o schema remoto para migração. Verifique se as tabelas foram criadas.'
+        );
       } else {
-        setMigrationStatus({
-          success: true,
-          message: `Migração concluída com sucesso! ${res.migrated} dívidas salvas na nuvem (${res.skipped} mantidas sem duplicar).`,
-        });
+        setPreviewData(preview);
+      }
+    } catch (err: any) {
+      setBlockingAlert(`Erro ao validar prévia da migração: ${err?.message || err}`);
+    } finally {
+      setIsCheckingPreview(false);
+    }
+  };
+
+  // Step 2: Execute migration only after explicit user confirmation
+  const handleConfirmMigration = async () => {
+    if (!authUser || !previewData?.ready) return;
+
+    setIsMigrating(true);
+    setBlockingAlert(null);
+
+    try {
+      const { localDebts, localGoals } = readLocalRecords();
+      const res = await migrateLocalDebtsToSupabase(localDebts, authUser.id, localGoals);
+      setMigrationReport(res);
+      setPreviewData(null);
+
+      if (!res.hasErrors && res.migrated > 0) {
         await onRefreshCloudData();
       }
     } catch (err: any) {
-      setMigrationStatus({
-        success: false,
-        message: `Falha na migração: ${err?.message || err}`,
-      });
+      setBlockingAlert(`Falha inesperada durante a migração: ${err?.message || err}`);
     } finally {
       setIsMigrating(false);
     }
@@ -122,6 +161,10 @@ export const SupabaseSyncBanner: React.FC<SupabaseSyncBannerProps> = ({
     );
   }
 
+  const totalToImportCount = previewData
+    ? previewData.debtsToImport.length + previewData.goalsToImport.length
+    : 0;
+
   // Status 2: Authenticated with Supabase
   return (
     <div className={`p-4 mb-6 rounded-2xl border transition-all space-y-3 ${
@@ -142,7 +185,7 @@ export const SupabaseSyncBanner: React.FC<SupabaseSyncBannerProps> = ({
               </span>
             </div>
             <p className="text-[11px] opacity-60">
-              Isolamento por usuário garantido. Somente sua conta tem acesso a essas dívidas.
+              Isolamento por usuário garantido. Seus dados locais permanecem preservados no navegador.
             </p>
           </div>
         </div>
@@ -159,14 +202,14 @@ export const SupabaseSyncBanner: React.FC<SupabaseSyncBannerProps> = ({
           </button>
 
           <button
-            onClick={handleMigrate}
-            disabled={isMigrating}
+            onClick={handlePreparePreview}
+            disabled={isCheckingPreview || isMigrating}
             className="flex-1 sm:flex-initial px-4 py-2 rounded-xl text-xs font-semibold bg-purple-600 hover:bg-purple-500 text-white shadow-md flex items-center justify-center gap-2 transition-all disabled:opacity-50"
           >
-            {isMigrating ? (
+            {isCheckingPreview ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Migrando dados...</span>
+                <span>Validando schema...</span>
               </>
             ) : (
               <>
@@ -178,18 +221,156 @@ export const SupabaseSyncBanner: React.FC<SupabaseSyncBannerProps> = ({
         </div>
       </div>
 
-      {migrationStatus && (
-        <div className={`p-3 rounded-xl border text-xs flex items-center gap-2 ${
-          migrationStatus.success
-            ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
-            : 'bg-rose-500/10 border-rose-500/30 text-rose-400'
+      {/* Blocking Error Banner (Schema not ready, invalid session, or RLS error) */}
+      {blockingAlert && (
+        <div className="p-3.5 rounded-xl border bg-rose-500/10 border-rose-500/30 text-rose-400 text-xs flex items-start justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-bold">Migração interrompida antes do envio</p>
+              <p className="opacity-90 leading-relaxed">{blockingAlert}</p>
+            </div>
+          </div>
+          <button
+            onClick={() => setBlockingAlert(null)}
+            className="p-1 rounded-lg hover:bg-rose-500/20 transition-all shrink-0"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Explicit Confirmation Preview Modal/Panel */}
+      {previewData && previewData.ready && (
+        <div className={`p-4 rounded-xl border text-xs space-y-3 ${
+          isDark ? 'bg-neutral-950/90 border-purple-500/30 text-slate-200' : 'bg-purple-50/60 border-purple-200 text-slate-800'
         }`}>
-          {migrationStatus.success ? (
-            <CheckCircle2 className="w-4 h-4 shrink-0" />
-          ) : (
-            <AlertCircle className="w-4 h-4 shrink-0" />
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 font-bold text-purple-400">
+              <FileCheck2 className="w-4 h-4" />
+              <span>Prévia da Importação Segura (Confirmação Obrigatória)</span>
+            </div>
+            <button
+              onClick={() => setPreviewData(null)}
+              className="p-1 rounded-lg opacity-70 hover:opacity-100"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <div className={`p-2.5 rounded-lg border ${
+              isDark ? 'bg-neutral-900 border-neutral-800' : 'bg-white border-slate-200'
+            }`}>
+              <p className="font-semibold mb-1">Dívidas Locais (divida_zero_debts)</p>
+              <p className="text-[11px] text-emerald-400 font-medium">
+                • {previewData.debtsToImport.length} nova(s) para importar
+              </p>
+              <p className="text-[11px] opacity-70">
+                • {previewData.debtsAlreadyInCloud.length} já existente(s) na nuvem (ignoradas)
+              </p>
+            </div>
+
+            <div className={`p-2.5 rounded-lg border ${
+              isDark ? 'bg-neutral-900 border-neutral-800' : 'bg-white border-slate-200'
+            }`}>
+              <p className="font-semibold mb-1">Metas Locais (divida_zero_goals)</p>
+              <p className="text-[11px] text-emerald-400 font-medium">
+                • {previewData.goalsToImport.length} nova(s) para importar
+              </p>
+              <p className="text-[11px] opacity-70">
+                • {previewData.goalsAlreadyInCloud.length} já existente(s) na nuvem (ignoradas)
+              </p>
+            </div>
+          </div>
+
+          <p className="text-[11px] opacity-75">
+            Os registros serão vinculados exclusivamente à conta <strong>{previewData.verifiedUserEmail}</strong> com IDs isolados por usuário. Nenhum dado do seu <code>localStorage</code> será apagado.
+          </p>
+
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => setPreviewData(null)}
+              disabled={isMigrating}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                isDark ? 'border-neutral-700 hover:bg-neutral-800 text-slate-300' : 'border-slate-300 hover:bg-slate-100 text-slate-700'
+              }`}
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmMigration}
+              disabled={isMigrating || totalToImportCount === 0}
+              className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm flex items-center gap-1.5 transition-all disabled:opacity-50"
+            >
+              {isMigrating ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Importando registros...</span>
+                </>
+              ) : totalToImportCount === 0 ? (
+                <span>Todos os registros já estão na nuvem</span>
+              ) : (
+                <>
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Confirmar Importação ({totalToImportCount})</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Per-Record Migration Result Report (Never declares success if hasErrors is true) */}
+      {migrationReport && (
+        <div className={`p-3.5 rounded-xl border text-xs space-y-2.5 ${
+          migrationReport.hasErrors
+            ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+            : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 font-bold">
+              {migrationReport.hasErrors ? (
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+              ) : (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              )}
+              <span>
+                {migrationReport.hasErrors
+                  ? `Migração concluída com falhas: ${migrationReport.migrated} importado(s), ${migrationReport.failed} falha(s), ${migrationReport.skipped} ignorado(s).`
+                  : `Importação concluída sem erros: ${migrationReport.migrated} importado(s) e ${migrationReport.skipped} mantido(s) sem duplicar.`}
+              </span>
+            </div>
+            <button
+              onClick={() => setMigrationReport(null)}
+              className="p-1 rounded-lg opacity-70 hover:opacity-100"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {migrationReport.records.length > 0 && (
+            <div className="max-h-40 overflow-y-auto space-y-1 pt-1 border-t border-current/10">
+              {migrationReport.records.map((rec, idx) => (
+                <div key={`${rec.type}-${rec.localId}-${idx}`} className="flex items-center justify-between gap-2 text-[11px] py-0.5">
+                  <span className="truncate font-medium">
+                    [{rec.type === 'debt' ? 'Dívida' : 'Meta'}] {rec.title} <span className="opacity-60">(ID local: {rec.localId})</span>
+                  </span>
+                  <span className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                    rec.status === 'imported'
+                      ? 'bg-emerald-500/20 text-emerald-300'
+                      : rec.status === 'skipped'
+                      ? 'bg-slate-500/20 text-slate-300'
+                      : 'bg-rose-500/20 text-rose-300'
+                  }`}>
+                    {rec.status === 'imported' ? 'Importado' : rec.status === 'skipped' ? 'Ignorado (Já existe)' : `Falhou (${rec.detail})`}
+                  </span>
+                </div>
+              ))}
+            </div>
           )}
-          <span>{migrationStatus.message}</span>
         </div>
       )}
     </div>
