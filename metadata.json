@@ -1,0 +1,6 @@
+{
+  "name": "Dívida Zero AI",
+  "description": "Dashboard financeiro inteligente com tema escuro preto e roxo neon para controle e quitação de dívidas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
