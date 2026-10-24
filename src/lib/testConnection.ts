@@ -99,9 +99,9 @@ export async function runBrowserConnectionTest(): Promise<ConnectionDiagnosticRe
           : 'N/A',
       });
     } else {
-      console.warn(
-        'ℹ️ Nenhuma sessão autenticada ativa (operando com papel `anon`). ' +
-          'Com o endurecimento de segurança (`REVOKE ALL ON TABLES FROM anon`), consultas sem login serão recusadas com 42501.'
+      console.info(
+        'ℹ️ Nenhuma sessão autenticada ativa no momento. ' +
+          'As consultas às tabelas (profiles, debts, installments, payments, goals) são realizadas apenas após o login.'
       );
     }
   } catch (err: any) {
@@ -109,12 +109,46 @@ export async function runBrowserConnectionTest(): Promise<ConnectionDiagnosticRe
     console.error('❌ Exceção ao verificar sessão:', err?.message || err);
   }
 
-  // 2. Testar leitura básica (SELECT ... LIMIT 1) nas 5 tabelas do schema public
+  // Se não houver sessão autenticada ativa, não consultar as tabelas antes do login
+  if (authStatus !== 'AUTHENTICATED' || !userId) {
+    const diagnosisCategory: ConnectionDiagnosticReport['diagnosisCategory'] =
+      authStatus === 'AUTH_ERROR' ? 'AUTH_ERROR' : 'AUTH_REQUIRED_ANON_BLOCKED';
+    const summary =
+      authStatus === 'AUTH_ERROR'
+        ? 'DIAGNÓSTICO [AUTENTICAÇÃO]: Falha ao verificar a sessão no Supabase Auth.'
+        : 'Aguardando login: conecte-se com sua conta para testar e sincronizar as 5 tabelas (profiles, debts, installments, payments, goals) com o cliente autenticado.';
+
+    console.info('🧭 Status do Diagnóstico:', summary);
+    console.info(
+      '💡 Dica: Após fazer login, execute `window.runSupabaseTestConnection()` no console para testar as 5 tabelas.'
+    );
+    console.groupEnd();
+
+    return {
+      timestamp,
+      configured: true,
+      keyStatus,
+      authStatus,
+      userId,
+      userEmail,
+      role,
+      tables: [],
+      diagnosisCategory,
+      summary,
+    };
+  }
+
+  // 2. Com sessão ativa, testar leitura básica nas 5 tabelas usando o cliente Supabase já autenticado
   const tables: TableDiagnosticResult[] = [];
 
   for (const table of PUBLIC_TABLES) {
     try {
-      const { data, error } = await supabase.from(table).select('*').limit(1);
+      const filterColumn = table === 'profiles' ? 'id' : 'user_id';
+      const { data, error } = await supabase
+        .from(table)
+        .select('*')
+        .eq(filterColumn, userId)
+        .limit(1);
 
       if (!error) {
         tables.push({
@@ -122,7 +156,7 @@ export async function runBrowserConnectionTest(): Promise<ConnectionDiagnosticRe
           readAccess: 'OK',
           rowCountSample: Array.isArray(data) ? data.length : 0,
           code: '200_OK',
-          message: 'Leitura permitida (SELECT OK)',
+          message: 'Leitura autenticada permitida (SELECT OK)',
         });
       } else {
         const code = error.code || 'UNKNOWN';
@@ -156,10 +190,10 @@ export async function runBrowserConnectionTest(): Promise<ConnectionDiagnosticRe
     }
   }
 
-  console.log('📊 Resultado de leitura por tabela (schema public):');
+  console.log('📊 Resultado de leitura autenticada por tabela (schema public):');
   console.table(tables);
 
-  // 3. Classificar a causa raiz (Autenticação vs. Schema vs. Leitura vs. Escrita)
+  // 3. Classificar o resultado das 5 tabelas para a sessão autenticada
   const missingTables = tables.filter((t) => t.readAccess === 'MISSING_TABLE');
   const permDeniedTables = tables.filter((t) => t.readAccess === 'PERMISSION_DENIED');
   const okTables = tables.filter((t) => t.readAccess === 'OK');
@@ -167,33 +201,21 @@ export async function runBrowserConnectionTest(): Promise<ConnectionDiagnosticRe
   let diagnosisCategory: ConnectionDiagnosticReport['diagnosisCategory'] = 'READ_OK_CHECK_WRITE_OR_RLS';
   let summary = '';
 
-  if (authStatus === 'AUTH_ERROR') {
-    diagnosisCategory = 'AUTH_ERROR';
-    summary =
-      'DIAGNÓSTICO [AUTENTICAÇÃO]: Falha ao validar a sessão no Supabase Auth. Verifique a chave pública anon e a conectividade.';
-  } else if (missingTables.length > 0) {
+  if (missingTables.length > 0) {
     diagnosisCategory = 'SCHEMA_MISSING';
     summary =
-      `DIAGNÓSTICO [SCHEMA / LEITURA]: ${missingTables.length}/5 tabelas não existem no schema public (${missingTables
+      `DIAGNÓSTICO [SCHEMA / LEITURA]: ${missingTables.length}/5 tabelas não foram encontradas no schema public (${missingTables
         .map((t) => t.table)
-        .join(', ')} - código PGRST205/42P01). ` +
-      'Execute o arquivo supabase/schema.sql no SQL Editor do Supabase para criar as tabelas e políticas RLS.';
-  } else if (permDeniedTables.length > 0 && authStatus === 'ANONYMOUS') {
-    diagnosisCategory = 'AUTH_REQUIRED_ANON_BLOCKED';
-    summary =
-      'DIAGNÓSTICO [AUTENTICAÇÃO]: Leitura recusada (42501) porque não há usuário autenticado (`role = anon`). ' +
-      'As tabelas existem e estão protegidas contra acesso anônimo. Faça login no modal do Supabase e execute `window.runSupabaseTestConnection()` novamente.';
-  } else if (permDeniedTables.length > 0 && authStatus === 'AUTHENTICATED') {
+        .join(', ')} - código PGRST205/42P01).`;
+  } else if (permDeniedTables.length > 0) {
     diagnosisCategory = 'READ_PERMISSION_ERROR';
     summary =
-      `DIAGNÓSTICO [PERMISSÃO DE LEITURA]: Usuário autenticado (${userEmail || userId}), mas a leitura falhou com 42501 em: ` +
-      `${permDeniedTables.map((t) => t.table).join(', ')}. ` +
-      'Faltam GRANT SELECT TO authenticated ou políticas RLS FOR SELECT USING ((select auth.uid()) = user_id) no banco remoto.';
-  } else if (okTables.length === PUBLIC_TABLES.length && authStatus === 'AUTHENTICATED') {
+      `DIAGNÓSTICO [PERMISSÃO DE LEITURA]: Usuário autenticado (${userEmail || userId}), mas a leitura retornou 42501 em: ` +
+      `${permDeniedTables.map((t) => t.table).join(', ')}.`;
+  } else if (okTables.length === PUBLIC_TABLES.length) {
     diagnosisCategory = 'READ_OK_CHECK_WRITE_OR_RLS';
     summary =
-      `DIAGNÓSTICO [AUTENTICAÇÃO E LEITURA OK]: Sessão ativa (${userEmail || userId}) e leitura (SELECT) liberada nas 5 tabelas. ` +
-      'Se ainda ocorrer erro ao sincronizar dados, o problema é exclusivamente de ESCRITA (INSERT/UPDATE/UPSERT: falta de WITH CHECK nas políticas RLS ou constraint de chave primária/estrangeira composta).';
+      `DIAGNÓSTICO [AUTENTICAÇÃO E LEITURA OK]: Sessão ativa (${userEmail || userId}) e leitura (SELECT) confirmada nas 5 tabelas (profiles, debts, installments, payments, goals).`;
   } else {
     summary =
       `DIAGNÓSTICO [PARCIAL]: Sessão=${authStatus}, Tabelas OK=${okTables.length}/${PUBLIC_TABLES.length}. ` +
