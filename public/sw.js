@@ -1,4 +1,4 @@
-const CACHE_NAME = 'divida-zero-v5';
+const CACHE_NAME = 'divida-zero-v6';
 const PRECACHE_ASSETS = [
   '/',
   '/index.html',

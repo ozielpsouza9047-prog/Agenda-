@@ -32,7 +32,7 @@ import { ActiveTab, DebtItem, FinancialSummary, UserProfile } from './types';
 import { initialDebts, initialSummary } from './mockData';
 import { calculateFinancialSummary } from './utils/calculations';
 import { checkAndTriggerNotifications } from './utils/notifications';
-import { X, ShieldAlert, LayoutDashboard, Wallet, Calendar, BarChart3, Target, Trophy, Sparkles, Settings, Calculator, User } from 'lucide-react';
+import { Calculator, Loader2 } from 'lucide-react';
 
 const defaultProfile: UserProfile = {
   name: 'Oziel Souza',
@@ -92,9 +92,12 @@ export default function App() {
   const [isMemoryModalOpen, setIsMemoryModalOpen] = useState<boolean>(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
   const [editingDebt, setEditingDebt] = useState<DebtItem | null>(null);
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth < 768 : false
+  );
   const [isOnline, setIsOnline] = useState<boolean>(() => typeof navigator !== 'undefined' ? navigator.onLine : true);
   const [authUser, setAuthUser] = useState<SupabaseUser | null>(null);
+  const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true);
 
   // Monitor network online/offline state
   useEffect(() => {
@@ -115,32 +118,45 @@ export default function App() {
     let isMounted = true;
 
     const initAuth = async () => {
-      if (!isSupabaseConfigured() || !supabase) return;
-
       try {
         const user = await getCurrentAuthUser();
         if (user && isMounted) {
           setAuthUser(user);
-          // Load cloud profile if exists
-          const cloudProfile = await fetchCloudProfile(user.id);
-          if (cloudProfile && isMounted) {
-            setUserProfile(cloudProfile);
-          } else if (isMounted) {
-            setUserProfile(prev => ({
-              ...prev,
-              email: user.email || prev.email,
-              name: user.user_metadata?.name || prev.name,
-            }));
-          }
+          if (isSupabaseConfigured() && supabase) {
+            // Load cloud profile if exists, preserving locally saved avatar if cloud avatar is empty
+            const cloudProfile = await fetchCloudProfile(user.id);
+            if (cloudProfile && isMounted) {
+              setUserProfile(prev => {
+                const merged = {
+                  ...cloudProfile,
+                  avatarUrl: cloudProfile.avatarUrl || prev.avatarUrl || '',
+                };
+                localStorage.setItem('divida_zero_profile', JSON.stringify(merged));
+                return merged;
+              });
+            } else if (isMounted) {
+              setUserProfile(prev => ({
+                ...prev,
+                email: user.email || prev.email,
+                name: user.user_metadata?.name || prev.name,
+              }));
+            }
 
-          // Load cloud debts if available
-          const cloudDebts = await fetchCloudDebts(user.id);
-          if (cloudDebts && cloudDebts.length > 0 && isMounted) {
-            setDebts(cloudDebts);
+            // Load cloud debts if available
+            const cloudDebts = await fetchCloudDebts(user.id);
+            if (cloudDebts && cloudDebts.length > 0 && isMounted) {
+              setDebts(cloudDebts);
+            }
           }
+        } else if (isMounted) {
+          setAuthUser(null);
         }
       } catch (err) {
         console.warn('Initial Supabase auth check:', err);
+      } finally {
+        if (isMounted) {
+          setIsCheckingAuth(false);
+        }
       }
     };
 
@@ -151,10 +167,18 @@ export default function App() {
         if (!isMounted) return;
         if (session?.user) {
           setAuthUser(session.user);
+          setIsCheckingAuth(false);
           if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
             const cloudProfile = await fetchCloudProfile(session.user.id);
             if (cloudProfile && isMounted) {
-              setUserProfile(cloudProfile);
+              setUserProfile(prev => {
+                const merged = {
+                  ...cloudProfile,
+                  avatarUrl: cloudProfile.avatarUrl || prev.avatarUrl || '',
+                };
+                localStorage.setItem('divida_zero_profile', JSON.stringify(merged));
+                return merged;
+              });
             } else if (isMounted) {
               setUserProfile(prev => ({
                 ...prev,
@@ -169,6 +193,7 @@ export default function App() {
           }
         } else if (event === 'SIGNED_OUT') {
           setAuthUser(null);
+          setIsCheckingAuth(false);
         }
       });
 
@@ -177,6 +202,10 @@ export default function App() {
         subscription.unsubscribe();
       };
     }
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   // Automatic recalculation hook and notifications check whenever debts change
@@ -262,6 +291,7 @@ export default function App() {
   const handleLogout = async () => {
     await signOutUser();
     setAuthUser(null);
+    setIsAuthModalOpen(false);
     setActiveTab('dashboard');
   };
 
@@ -284,16 +314,82 @@ export default function App() {
     setActiveTab('dashboard');
   };
 
+  // 1. Loading Screen while verifying active session
+  if (isCheckingAuth) {
+    return (
+      <div className="min-h-screen w-full flex flex-col items-center justify-center p-6 bg-[#07070C] text-slate-100">
+        <div className="flex flex-col items-center gap-4 text-center max-w-sm">
+          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-purple-600 via-purple-500 to-indigo-600 flex items-center justify-center text-white shadow-[0_0_30px_rgba(168,85,247,0.35)] border border-purple-400/30">
+            <Loader2 className="w-7 h-7 animate-spin" />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold tracking-tight text-white">Dívida Zero AI</h1>
+            <p className="text-xs text-slate-400 mt-1">Verificando sessão autenticada...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 2. Authentication Gate: block access to financial dashboard and private data when there is no valid session
+  if (!authUser) {
+    return (
+      <SupabaseAuthModal
+        isOpen={true}
+        requireAuth={true}
+        authenticatedProfile={null}
+        savedAvatarUrl={userProfile.avatarUrl}
+        onClose={() => {}}
+        isDark={isDark}
+        onAuthSuccess={async (email, name) => {
+          const user = await getCurrentAuthUser();
+          if (user) {
+            setAuthUser(user);
+            const cloudProfile = await fetchCloudProfile(user.id);
+            if (cloudProfile) {
+              setUserProfile(prev => {
+                const mergedProfile = {
+                  ...cloudProfile,
+                  avatarUrl: cloudProfile.avatarUrl || prev.avatarUrl || '',
+                };
+                localStorage.setItem('divida_zero_profile', JSON.stringify(mergedProfile));
+                return mergedProfile;
+              });
+            } else {
+              setUserProfile(prev => {
+                const updated = {
+                  ...prev,
+                  email: email || user.email || prev.email,
+                  name: name || user.user_metadata?.name || prev.name,
+                  avatarUrl: prev.avatarUrl || '',
+                };
+                localStorage.setItem('divida_zero_profile', JSON.stringify(updated));
+                return updated;
+              });
+            }
+            const cloudDebts = await fetchCloudDebts(user.id);
+            if (cloudDebts && cloudDebts.length > 0) {
+              setDebts(cloudDebts);
+            }
+          }
+        }}
+      />
+    );
+  }
+
   return (
     <div className={`min-h-screen flex transition-colors duration-300 ${
       isDark ? 'bg-neutral-950 text-neutral-100' : 'bg-slate-50 text-slate-900'
     }`}>
-      {/* Desktop Sidebar */}
+      {/* Internal Collapsible Sidebar (Desktop & Mobile) */}
       <Sidebar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         isDark={isDark}
         userProfile={userProfile}
+        isCollapsed={isSidebarCollapsed}
+        onToggleCollapse={() => setIsSidebarCollapsed(prev => !prev)}
+        onLogout={handleLogout}
       />
 
       {/* Main Content Area */}
@@ -302,7 +398,7 @@ export default function App() {
           activeTab={activeTab}
           isDark={isDark}
           setIsDark={setIsDark}
-          onOpenMobileMenu={() => setIsMobileMenuOpen(true)}
+          onOpenMobileMenu={() => setIsSidebarCollapsed(prev => !prev)}
           onOpenAddDebt={() => {
             setEditingDebt(null);
             setIsAddModalOpen(true);
@@ -422,68 +518,6 @@ export default function App() {
       {/* Mobile Bottom Navigation */}
       <BottomNav activeTab={activeTab} setActiveTab={setActiveTab} isDark={isDark} />
 
-      {/* Mobile Sidebar Drawer */}
-      {isMobileMenuOpen && (
-        <div className="fixed inset-0 z-50 flex md:hidden bg-black/70 backdrop-blur-sm animate-fade-in">
-          <div className={`w-72 h-full flex flex-col p-6 ${isDark ? 'bg-neutral-950 text-white' : 'bg-white text-slate-900'}`}>
-            <div className="flex items-center justify-between pb-6 border-b border-inherit">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-purple-600 to-indigo-600 flex items-center justify-center text-white">
-                  <ShieldAlert className="w-5 h-5" />
-                </div>
-                <div>
-                  <span className="font-bold text-base tracking-tight bg-gradient-to-r from-purple-400 to-indigo-300 bg-clip-text text-transparent">
-                    Dívida Zero
-                  </span>
-                  <span className="block text-[10px] font-mono text-purple-400 uppercase">AI Assistant</span>
-                </div>
-              </div>
-              <button
-                onClick={() => setIsMobileMenuOpen(false)}
-                className="p-2 rounded-lg opacity-70 hover:opacity-100"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="flex-1 py-6 space-y-2">
-              {[
-                { id: 'dashboard' as ActiveTab, label: 'Visão Geral', icon: LayoutDashboard },
-                { id: 'debts' as ActiveTab, label: 'Minhas Dívidas', icon: Wallet },
-                { id: 'forecast' as ActiveTab, label: 'Calendário & Fluxo', icon: Calendar },
-                { id: 'reports' as ActiveTab, label: 'Relatórios', icon: BarChart3 },
-                { id: 'planner' as ActiveTab, label: 'Planejador', icon: Target },
-                { id: 'goals' as ActiveTab, label: 'Minhas Metas', icon: Trophy },
-                { id: 'ai_advisor' as ActiveTab, label: 'IA Dívida Zero', icon: Sparkles },
-                { id: 'profile' as ActiveTab, label: 'Meu Perfil', icon: User },
-                { id: 'settings' as ActiveTab, label: 'Configurações', icon: Settings },
-              ].map(item => {
-                const Icon = item.icon;
-                const isActive = activeTab === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    onClick={() => {
-                      setActiveTab(item.id);
-                      setIsMobileMenuOpen(false);
-                    }}
-                    className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-sm transition-colors ${
-                      isActive
-                        ? 'bg-purple-600 text-white shadow-md'
-                        : isDark ? 'text-neutral-300 hover:bg-neutral-900' : 'text-slate-700 hover:bg-slate-100'
-                    }`}
-                  >
-                    <Icon className="w-5 h-5" />
-                    <span>{item.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-          <div className="flex-1" onClick={() => setIsMobileMenuOpen(false)} />
-        </div>
-      )}
-
       {/* Add / Edit Debt Modal */}
       <AddDebtModal
         isOpen={isAddModalOpen}
@@ -516,16 +550,36 @@ export default function App() {
         isDark={isDark}
       />
 
-      {/* Supabase Authentication and Configuration Modal */}
+      {/* Supabase Authentication and Configuration Screen */}
       <SupabaseAuthModal
         isOpen={isAuthModalOpen}
         onClose={() => setIsAuthModalOpen(false)}
         isDark={isDark}
+        savedAvatarUrl={userProfile.avatarUrl}
+        authenticatedProfile={
+          authUser
+            ? {
+                name: userProfile.name,
+                email: authUser.email || userProfile.email,
+                avatarUrl: userProfile.avatarUrl,
+              }
+            : null
+        }
         onAuthSuccess={async (email, name) => {
           setIsAuthModalOpen(false);
           const user = await getCurrentAuthUser();
           if (user) {
             setAuthUser(user);
+            setUserProfile(prev => {
+              const updated = {
+                ...prev,
+                email: email || user.email || prev.email,
+                name: name || user.user_metadata?.name || prev.name,
+                avatarUrl: prev.avatarUrl,
+              };
+              localStorage.setItem('divida_zero_profile', JSON.stringify(updated));
+              return updated;
+            });
             await handleRefreshCloudData();
           }
         }}

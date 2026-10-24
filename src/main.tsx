@@ -18,7 +18,7 @@ if ('serviceWorker' in navigator) {
         const keys = await caches.keys();
         await Promise.all(
           keys
-            .filter((key) => key !== 'divida-zero-v5')
+            .filter((key) => key !== 'divida-zero-v6')
             .map((key) => caches.delete(key))
         );
       }

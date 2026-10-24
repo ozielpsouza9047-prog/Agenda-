@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Sparkles, Send, Bot, User, ArrowRight, ShieldCheck, Zap, Loader2 } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { Sparkles, Send, Bot, User, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
 import { DebtItem } from '../types';
 
 interface AIAssistantViewProps {
@@ -16,6 +16,25 @@ export const AIAssistantView: React.FC<AIAssistantViewProps> = ({ debts, isDark 
   ]);
   const [inputQuery, setInputQuery] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(true);
+
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+
+  // Close/collapse the chat when clicking outside the chat area without interfering with internal buttons/inputs
+  useEffect(() => {
+    const handlePointerDownOutside = (event: PointerEvent) => {
+      if (!isChatOpen) return;
+      const target = event.target as Node | null;
+      if (chatContainerRef.current && target && !chatContainerRef.current.contains(target)) {
+        setIsChatOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDownOutside);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDownOutside);
+    };
+  }, [isChatOpen]);
 
   const quickPrompts = [
     'Quanto preciso pagar até o fim do mês?',
@@ -28,6 +47,10 @@ export const AIAssistantView: React.FC<AIAssistantViewProps> = ({ debts, isDark 
   const handleSend = async (queryText?: string) => {
     const query = queryText || inputQuery;
     if (!query.trim()) return;
+
+    if (!isChatOpen) {
+      setIsChatOpen(true);
+    }
 
     setMessages(prev => [...prev, { sender: 'user', text: query }]);
     if (!queryText) setInputQuery('');
@@ -116,98 +139,174 @@ export const AIAssistantView: React.FC<AIAssistantViewProps> = ({ debts, isDark 
         </p>
       </div>
 
-      {/* Quick Prompts Chips */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-2">
-        {quickPrompts.map((prompt, idx) => (
-          <button
-            key={idx}
-            onClick={() => handleSend(prompt)}
-            className={`px-3 py-1.5 text-xs font-medium rounded-xl border whitespace-nowrap transition-all ${
-              isDark
-                ? 'bg-neutral-900 border-neutral-800 text-purple-300 hover:border-purple-500/50 hover:bg-neutral-800'
-                : 'bg-white border-slate-200 text-purple-800 hover:border-purple-300 shadow-sm'
-            }`}
-          >
-            {prompt}
-          </button>
-        ))}
-      </div>
-
-      {/* Chat Interface */}
-      <div className={`rounded-2xl border flex flex-col h-[520px] ${
-        isDark ? 'bg-neutral-900/80 border-neutral-800' : 'bg-white border-slate-200'
-      }`}>
-        {/* Chat Header */}
-        <div className={`p-4 border-b flex items-center gap-3 ${isDark ? 'border-neutral-800 bg-neutral-950/40' : 'border-slate-200 bg-slate-50'}`}>
-          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-purple-600 to-indigo-600 flex items-center justify-center text-white shadow-md">
-            <Bot className="w-4 h-4" />
-          </div>
-          <div>
-            <h3 className={`text-xs font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>Assistente Especializado Dívida Zero</h3>
-            <p className="text-[10px] text-purple-400">Online · Conectado aos seus cálculos</p>
-          </div>
+      {/* Interactive Chat Wrapper (Ref protects internal buttons, quick prompts, and inputs from outside-click close) */}
+      <div ref={chatContainerRef} className="space-y-4">
+        {/* Quick Prompts Chips */}
+        <div className="flex items-center gap-2 overflow-x-auto pb-2">
+          {quickPrompts.map((prompt, idx) => (
+            <button
+              key={idx}
+              type="button"
+              onClick={() => handleSend(prompt)}
+              className={`px-3 py-1.5 text-xs font-medium rounded-xl border whitespace-nowrap transition-all ${
+                isDark
+                  ? 'bg-neutral-900 border-neutral-800 text-purple-300 hover:border-purple-500/50 hover:bg-neutral-800'
+                  : 'bg-white border-slate-200 text-purple-800 hover:border-purple-300 shadow-sm'
+              }`}
+            >
+              {prompt}
+            </button>
+          ))}
         </div>
 
-        {/* Messages list */}
-        <div className="flex-1 p-4 overflow-y-auto space-y-4 text-xs">
-          {messages.map((msg, idx) => (
-            <div
-              key={idx}
-              className={`flex items-start gap-3 ${msg.sender === 'user' ? 'flex-row-reverse' : ''}`}
-            >
-              <div className={`w-7 h-7 rounded-full flex items-center justify-center text-white shrink-0 ${
-                msg.sender === 'user' ? 'bg-purple-600' : 'bg-gradient-to-br from-indigo-600 to-purple-700'
-              }`}>
-                {msg.sender === 'user' ? <User className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
+        {/* Chat Interface */}
+        <div
+          className={`rounded-2xl border flex flex-col overflow-hidden transition-all duration-300 ${
+            isChatOpen ? 'h-[520px]' : 'h-auto'
+          } ${isDark ? 'bg-neutral-900/80 border-neutral-800' : 'bg-white border-slate-200'}`}
+        >
+          {/* Chat Header with Small Arrow Button to Collapse and Reopen */}
+          <div
+            onClick={() => setIsChatOpen((prev) => !prev)}
+            className={`p-4 flex items-center justify-between gap-3 cursor-pointer select-none transition-colors ${
+              isChatOpen ? 'border-b' : ''
+            } ${
+              isDark
+                ? 'border-neutral-800 bg-neutral-950/40 hover:bg-neutral-950/70'
+                : 'border-slate-200 bg-slate-50 hover:bg-slate-100/80'
+            }`}
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-purple-600 to-indigo-600 flex items-center justify-center text-white shadow-md shrink-0">
+                <Bot className="w-4 h-4" />
               </div>
-              <div className={`max-w-[80%] p-3.5 rounded-2xl leading-relaxed ${
-                msg.sender === 'user'
-                  ? 'bg-purple-600 text-white rounded-tr-none'
-                  : isDark
-                    ? 'bg-neutral-950/80 border border-neutral-800 text-neutral-200 rounded-tl-none'
-                    : 'bg-slate-100 text-slate-800 rounded-tl-none'
-              }`}>
-                {msg.text}
+              <div className="min-w-0">
+                <h3 className={`text-xs font-bold truncate ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                  Assistente Especializado Dívida Zero
+                </h3>
+                <p className="text-[10px] text-purple-400 truncate">
+                  {isChatOpen
+                    ? 'Online · Conectado aos seus cálculos'
+                    : 'Chat recolhido · Clique na seta para reabrir'}
+                </p>
               </div>
             </div>
-          ))}
 
-          {isTyping && (
-            <div className="flex items-center gap-3">
-              <div className="w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center text-white">
-                <Bot className="w-3.5 h-3.5" />
+            {/* Small Arrow Button to Collapse / Reopen Chat */}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsChatOpen((prev) => !prev);
+              }}
+              title={isChatOpen ? 'Recolher chat' : 'Reabrir chat'}
+              aria-label={isChatOpen ? 'Recolher chat' : 'Reabrir chat'}
+              aria-expanded={isChatOpen}
+              className={`p-2 rounded-xl border transition-all shrink-0 ${
+                isDark
+                  ? 'bg-neutral-900 border-purple-500/40 text-purple-300 hover:bg-purple-600 hover:text-white'
+                  : 'bg-white border-purple-300 text-purple-700 hover:bg-purple-600 hover:text-white'
+              }`}
+            >
+              {isChatOpen ? (
+                <ChevronDown className="w-4 h-4" />
+              ) : (
+                <ChevronUp className="w-4 h-4" />
+              )}
+            </button>
+          </div>
+
+          {/* Collapsible Chat Body: Messages + Input */}
+          {isChatOpen && (
+            <>
+              {/* Messages list */}
+              <div className="flex-1 p-4 overflow-y-auto space-y-4 text-xs">
+                {messages.map((msg, idx) => (
+                  <div
+                    key={idx}
+                    className={`flex items-start gap-3 ${msg.sender === 'user' ? 'flex-row-reverse' : ''}`}
+                  >
+                    <div
+                      className={`w-7 h-7 rounded-full flex items-center justify-center text-white shrink-0 ${
+                        msg.sender === 'user'
+                          ? 'bg-purple-600'
+                          : 'bg-gradient-to-br from-indigo-600 to-purple-700'
+                      }`}
+                    >
+                      {msg.sender === 'user' ? (
+                        <User className="w-3.5 h-3.5" />
+                      ) : (
+                        <Bot className="w-3.5 h-3.5" />
+                      )}
+                    </div>
+                    <div
+                      className={`max-w-[80%] p-3.5 rounded-2xl leading-relaxed ${
+                        msg.sender === 'user'
+                          ? 'bg-purple-600 text-white rounded-tr-none'
+                          : isDark
+                          ? 'bg-neutral-950/80 border border-neutral-800 text-neutral-200 rounded-tl-none'
+                          : 'bg-slate-100 text-slate-800 rounded-tl-none'
+                      }`}
+                    >
+                      {msg.text}
+                    </div>
+                  </div>
+                ))}
+
+                {isTyping && (
+                  <div className="flex items-center gap-3">
+                    <div className="w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center text-white">
+                      <Bot className="w-3.5 h-3.5" />
+                    </div>
+                    <div
+                      className={`p-3 rounded-2xl text-xs flex items-center gap-2 ${
+                        isDark
+                          ? 'bg-neutral-950 border border-neutral-800 text-neutral-400'
+                          : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      <Loader2 className="w-4 h-4 animate-spin text-purple-400" />
+                      <span>Consultando cálculos do sistema...</span>
+                    </div>
+                  </div>
+                )}
               </div>
-              <div className={`p-3 rounded-2xl text-xs flex items-center gap-2 ${isDark ? 'bg-neutral-950 border border-neutral-800 text-neutral-400' : 'bg-slate-100 text-slate-600'}`}>
-                <Loader2 className="w-4 h-4 animate-spin text-purple-400" />
-                <span>Consultando cálculos do sistema...</span>
-              </div>
-            </div>
+
+              {/* Chat Input */}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleSend();
+                }}
+                className={`p-3 border-t flex items-center gap-2 ${
+                  isDark ? 'border-neutral-800 bg-neutral-950/40' : 'border-slate-200 bg-slate-50'
+                }`}
+              >
+                <input
+                  type="text"
+                  placeholder="Digite sua pergunta financeira..."
+                  value={inputQuery}
+                  onChange={(e) => setInputQuery(e.target.value)}
+                  className={`flex-1 px-4 py-2.5 text-xs rounded-xl border outline-none transition-all ${
+                    isDark
+                      ? 'bg-neutral-900 border-neutral-800 text-white focus:border-purple-500'
+                      : 'bg-white border-slate-200 text-slate-900 focus:border-purple-400'
+                  }`}
+                />
+                <button
+                  type="submit"
+                  className="p-2.5 rounded-xl text-white bg-purple-600 hover:bg-purple-500 shadow-md transition-all"
+                  title="Enviar mensagem"
+                  aria-label="Enviar mensagem"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </form>
+            </>
           )}
         </div>
-
-        {/* Chat Input */}
-        <form onSubmit={(e) => { e.preventDefault(); handleSend(); }} className={`p-3 border-t flex items-center gap-2 ${
-          isDark ? 'border-neutral-800 bg-neutral-950/40' : 'border-slate-200 bg-slate-50'
-        }`}>
-          <input
-            type="text"
-            placeholder="Digite sua pergunta financeira..."
-            value={inputQuery}
-            onChange={(e) => setInputQuery(e.target.value)}
-            className={`flex-1 px-4 py-2.5 text-xs rounded-xl border outline-none transition-all ${
-              isDark
-                ? 'bg-neutral-900 border-neutral-800 text-white focus:border-purple-500'
-                : 'bg-white border-slate-200 text-slate-900 focus:border-purple-400'
-            }`}
-          />
-          <button
-            type="submit"
-            className="p-2.5 rounded-xl text-white bg-purple-600 hover:bg-purple-500 shadow-md transition-all"
-          >
-            <Send className="w-4 h-4" />
-          </button>
-        </form>
       </div>
     </div>
   );
 };
+
