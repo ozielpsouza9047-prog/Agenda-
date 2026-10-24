@@ -10,13 +10,24 @@ runBrowserConnectionTest().catch((err) => {
 
 createRoot(document.getElementById('root')!).render(<App />);
 
-// Register Service Worker for PWA
+// Register and update Service Worker, clearing outdated caches
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').then((registration) => {
-      console.log('ServiceWorker registration successful with scope: ', registration.scope);
-    }, (err) => {
-      console.log('ServiceWorker registration failed: ', err);
-    });
+  window.addEventListener('load', async () => {
+    try {
+      if ('caches' in window) {
+        const keys = await caches.keys();
+        await Promise.all(
+          keys
+            .filter((key) => key !== 'divida-zero-v5')
+            .map((key) => caches.delete(key))
+        );
+      }
+      const registration = await navigator.serviceWorker.register('/sw.js', {
+        updateViaCache: 'none',
+      });
+      await registration.update();
+    } catch (err) {
+      console.log('ServiceWorker update check:', err);
+    }
   });
 }
