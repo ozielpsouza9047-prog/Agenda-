@@ -72,18 +72,8 @@ export default function App() {
     return defaultProfile;
   });
   
-  // Initialize debts from localStorage if available, otherwise initialDebts
-  const [debts, setDebts] = useState<DebtItem[]>(() => {
-    const saved = localStorage.getItem('divida_zero_debts');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error('Failed to parse debts from localStorage', e);
-      }
-    }
-    return initialDebts;
-  });
+  // Initialize debts empty before authentication; debts are loaded only after a valid session is verified
+  const [debts, setDebts] = useState<DebtItem[]>([]);
 
   const [summary, setSummary] = useState<FinancialSummary>(initialSummary);
   const [memoryItems, setMemoryItems] = useState<{ label: string; formula: string; value: string }[]>([]);
@@ -113,7 +103,92 @@ export default function App() {
     };
   }, []);
 
-  // Supabase Auth and Cloud Session initialization
+  // Load authenticated user's profile and debts (strictly after valid authentication)
+  const loadAuthenticatedUserData = async (
+    user: SupabaseUser,
+    fallbackEmail?: string,
+    fallbackName?: string
+  ) => {
+    if (!isSupabaseConfigured() || !supabase) return;
+
+    const userProfileKey = `divida_zero_profile_${user.id}`;
+    const userDebtsKey = `divida_zero_debts_${user.id}`;
+
+    // 1. Load cloud profile for this authenticated user
+    const cloudProfile = await fetchCloudProfile(user.id);
+    const savedUserProfileRaw = localStorage.getItem(userProfileKey);
+    let savedUserProfile: Partial<UserProfile> = {};
+    if (savedUserProfileRaw) {
+      try {
+        savedUserProfile = JSON.parse(savedUserProfileRaw);
+      } catch {
+        savedUserProfile = {};
+      }
+    }
+
+    if (cloudProfile) {
+      setUserProfile(prev => {
+        const merged: UserProfile = {
+          ...prev,
+          ...savedUserProfile,
+          ...cloudProfile,
+          email: cloudProfile.email || fallbackEmail || user.email || savedUserProfile.email || '',
+          name:
+            cloudProfile.name ||
+            fallbackName ||
+            user.user_metadata?.name ||
+            savedUserProfile.name ||
+            user.email?.split('@')[0] ||
+            'Usuário',
+          avatarUrl: cloudProfile.avatarUrl || savedUserProfile.avatarUrl || '',
+        };
+        localStorage.setItem(userProfileKey, JSON.stringify(merged));
+        localStorage.setItem('divida_zero_profile', JSON.stringify(merged));
+        return merged;
+      });
+    } else {
+      setUserProfile(prev => {
+        const updated: UserProfile = {
+          ...prev,
+          ...savedUserProfile,
+          email: fallbackEmail || user.email || savedUserProfile.email || '',
+          name:
+            fallbackName ||
+            user.user_metadata?.name ||
+            savedUserProfile.name ||
+            user.email?.split('@')[0] ||
+            'Usuário',
+          avatarUrl: savedUserProfile.avatarUrl || user.user_metadata?.avatar_url || '',
+        };
+        localStorage.setItem(userProfileKey, JSON.stringify(updated));
+        localStorage.setItem('divida_zero_profile', JSON.stringify(updated));
+        return updated;
+      });
+    }
+
+    // 2. Load cloud debts bound to this authenticated user (RLS: auth.uid() = user_id)
+    const cloudDebts = await fetchCloudDebts(user.id);
+    if (cloudDebts && cloudDebts.length > 0) {
+      setDebts(cloudDebts);
+      localStorage.setItem(userDebtsKey, JSON.stringify(cloudDebts));
+    } else {
+      const savedUserDebts = localStorage.getItem(userDebtsKey);
+      if (savedUserDebts) {
+        try {
+          const parsed = JSON.parse(savedUserDebts);
+          if (Array.isArray(parsed)) {
+            setDebts(parsed);
+            return;
+          }
+        } catch (e) {
+          console.error('Failed to parse user-scoped debts from localStorage', e);
+        }
+      }
+      setDebts(cloudDebts || []);
+    }
+  };
+
+  // Supabase Auth and Persistent Cloud Session initialization
   useEffect(() => {
     let isMounted = true;
 
@@ -122,34 +197,10 @@ export default function App() {
         const user = await getCurrentAuthUser();
         if (user && isMounted) {
           setAuthUser(user);
-          if (isSupabaseConfigured() && supabase) {
-            // Load cloud profile if exists, preserving locally saved avatar if cloud avatar is empty
-            const cloudProfile = await fetchCloudProfile(user.id);
-            if (cloudProfile && isMounted) {
-              setUserProfile(prev => {
-                const merged = {
-                  ...cloudProfile,
-                  avatarUrl: cloudProfile.avatarUrl || prev.avatarUrl || '',
-                };
-                localStorage.setItem('divida_zero_profile', JSON.stringify(merged));
-                return merged;
-              });
-            } else if (isMounted) {
-              setUserProfile(prev => ({
-                ...prev,
-                email: user.email || prev.email,
-                name: user.user_metadata?.name || prev.name,
-              }));
-            }
-
-            // Load cloud debts if available
-            const cloudDebts = await fetchCloudDebts(user.id);
-            if (cloudDebts && cloudDebts.length > 0 && isMounted) {
-              setDebts(cloudDebts);
-            }
-          }
+          await loadAuthenticatedUserData(user);
         } else if (isMounted) {
           setAuthUser(null);
+          setDebts([]);
         }
       } catch (err) {
         console.warn('Initial Supabase auth check:', err);
@@ -168,31 +219,20 @@ export default function App() {
         if (session?.user) {
           setAuthUser(session.user);
           setIsCheckingAuth(false);
-          if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
-            const cloudProfile = await fetchCloudProfile(session.user.id);
-            if (cloudProfile && isMounted) {
-              setUserProfile(prev => {
-                const merged = {
-                  ...cloudProfile,
-                  avatarUrl: cloudProfile.avatarUrl || prev.avatarUrl || '',
-                };
-                localStorage.setItem('divida_zero_profile', JSON.stringify(merged));
-                return merged;
-              });
-            } else if (isMounted) {
-              setUserProfile(prev => ({
-                ...prev,
-                email: session.user.email || prev.email,
-                name: session.user.user_metadata?.name || prev.name,
-              }));
-            }
-            const cloudDebts = await fetchCloudDebts(session.user.id);
-            if (cloudDebts && cloudDebts.length > 0 && isMounted) {
-              setDebts(cloudDebts);
-            }
+          if (event === 'PASSWORD_RECOVERY') {
+            setActiveTab('profile');
+          }
+          if (
+            event === 'INITIAL_SESSION' ||
+            event === 'SIGNED_IN' ||
+            event === 'TOKEN_REFRESHED' ||
+            event === 'USER_UPDATED'
+          ) {
+            await loadAuthenticatedUserData(session.user);
           }
         } else if (event === 'SIGNED_OUT') {
           setAuthUser(null);
+          setDebts([]);
           setIsCheckingAuth(false);
         }
       });
@@ -208,24 +248,29 @@ export default function App() {
     };
   }, []);
 
-  // Automatic recalculation hook and notifications check whenever debts change
+  // Automatic recalculation hook and notifications check whenever debts change (only when authenticated)
   useEffect(() => {
-    localStorage.setItem('divida_zero_debts', JSON.stringify(debts));
     const result = calculateFinancialSummary(debts);
     setSummary(result.summary);
     setMemoryItems(result.memory);
 
+    if (!authUser) return;
+
+    localStorage.setItem(`divida_zero_debts_${authUser.id}`, JSON.stringify(debts));
+    localStorage.setItem('divida_zero_debts', JSON.stringify(debts));
+
     const notifEnabled = localStorage.getItem('divida_zero_notif_enabled') !== 'false';
     checkAndTriggerNotifications(debts, notifEnabled);
-  }, [debts]);
+  }, [debts, authUser]);
 
   // Refresh debts from Supabase Cloud
   const handleRefreshCloudData = async () => {
     if (!authUser) return;
     try {
       const cloudDebts = await fetchCloudDebts(authUser.id);
-      if (cloudDebts && cloudDebts.length > 0) {
+      if (cloudDebts) {
         setDebts(cloudDebts);
+        localStorage.setItem(`divida_zero_debts_${authUser.id}`, JSON.stringify(cloudDebts));
       }
     } catch (err) {
       console.error('Error refreshing cloud data:', err);
@@ -234,6 +279,7 @@ export default function App() {
 
   // Handle saving (add or update) a debt
   const handleSaveDebt = async (debtItem: DebtItem) => {
+    if (!authUser) return;
     const exists = debts.some(d => d.id === debtItem.id);
     let updatedDebts: DebtItem[];
     if (exists) {
@@ -244,18 +290,14 @@ export default function App() {
     setDebts(updatedDebts);
     setEditingDebt(null);
 
-    // Persist to Supabase if authenticated
-    if (authUser) {
-      await saveCloudDebt(debtItem, authUser.id);
-    }
+    await saveCloudDebt(debtItem, authUser.id);
   };
 
   // Handle importing a debt from PDF boleto
   const handleImportDebt = async (debtItem: DebtItem) => {
+    if (!authUser) return;
     setDebts(prev => [debtItem, ...prev]);
-    if (authUser) {
-      await saveCloudDebt(debtItem, authUser.id);
-    }
+    await saveCloudDebt(debtItem, authUser.id);
   };
 
   // Handle editing request
@@ -266,16 +308,20 @@ export default function App() {
 
   // Handle deleting a debt
   const handleDeleteDebt = async (id: string) => {
+    if (!authUser) return;
     const updatedDebts = debts.filter(d => d.id !== id);
     setDebts(updatedDebts);
-    if (authUser) {
-      await deleteCloudDebt(id, authUser.id);
-    }
+    await deleteCloudDebt(id, authUser.id);
   };
 
   // Handle restoring debts from backup
-  const handleRestoreDebts = (restored: DebtItem[]) => {
+  const handleRestoreDebts = async (restored: DebtItem[]) => {
     setDebts(restored);
+    if (authUser) {
+      for (const item of restored) {
+        await saveCloudDebt(item, authUser.id);
+      }
+    }
   };
 
   // Handle updating user profile
@@ -283,6 +329,7 @@ export default function App() {
     setUserProfile(updated);
     localStorage.setItem('divida_zero_profile', JSON.stringify(updated));
     if (authUser) {
+      localStorage.setItem(`divida_zero_profile_${authUser.id}`, JSON.stringify(updated));
       await saveCloudProfile(updated, authUser.id);
     }
   };
@@ -291,6 +338,7 @@ export default function App() {
   const handleLogout = async () => {
     await signOutUser();
     setAuthUser(null);
+    setDebts([]);
     setIsAuthModalOpen(false);
     setActiveTab('dashboard');
   };
@@ -301,6 +349,9 @@ export default function App() {
       for (const d of debts) {
         await deleteCloudDebt(d.id, authUser.id);
       }
+      localStorage.removeItem(`divida_zero_debts_${authUser.id}`);
+      localStorage.removeItem(`divida_zero_profile_${authUser.id}`);
+      localStorage.removeItem(`divida_zero_goals_${authUser.id}`);
       await signOutUser();
       setAuthUser(null);
     }
@@ -345,32 +396,7 @@ export default function App() {
           const user = await getCurrentAuthUser();
           if (user) {
             setAuthUser(user);
-            const cloudProfile = await fetchCloudProfile(user.id);
-            if (cloudProfile) {
-              setUserProfile(prev => {
-                const mergedProfile = {
-                  ...cloudProfile,
-                  avatarUrl: cloudProfile.avatarUrl || prev.avatarUrl || '',
-                };
-                localStorage.setItem('divida_zero_profile', JSON.stringify(mergedProfile));
-                return mergedProfile;
-              });
-            } else {
-              setUserProfile(prev => {
-                const updated = {
-                  ...prev,
-                  email: email || user.email || prev.email,
-                  name: name || user.user_metadata?.name || prev.name,
-                  avatarUrl: prev.avatarUrl || '',
-                };
-                localStorage.setItem('divida_zero_profile', JSON.stringify(updated));
-                return updated;
-              });
-            }
-            const cloudDebts = await fetchCloudDebts(user.id);
-            if (cloudDebts && cloudDebts.length > 0) {
-              setDebts(cloudDebts);
-            }
+            await loadAuthenticatedUserData(user, email, name);
           }
         }}
       />
@@ -481,7 +507,7 @@ export default function App() {
           )}
 
           {activeTab === 'goals' && (
-            <GoalsView debts={debts} isDark={isDark} />
+            <GoalsView debts={debts} isDark={isDark} userId={authUser.id} />
           )}
 
           {activeTab === 'ai_advisor' && (
@@ -490,6 +516,7 @@ export default function App() {
 
           {activeTab === 'profile' && (
             <ProfileView
+              userId={authUser.id}
               profile={userProfile}
               onUpdateProfile={handleUpdateProfile}
               debts={debts}
@@ -570,17 +597,7 @@ export default function App() {
           const user = await getCurrentAuthUser();
           if (user) {
             setAuthUser(user);
-            setUserProfile(prev => {
-              const updated = {
-                ...prev,
-                email: email || user.email || prev.email,
-                name: name || user.user_metadata?.name || prev.name,
-                avatarUrl: prev.avatarUrl,
-              };
-              localStorage.setItem('divida_zero_profile', JSON.stringify(updated));
-              return updated;
-            });
-            await handleRefreshCloudData();
+            await loadAuthenticatedUserData(user, email, name);
           }
         }}
       />

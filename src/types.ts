@@ -28,6 +28,10 @@ export interface UserProfile {
   name: string;
   email: string;
   avatarUrl?: string;
+  phone?: string;
+  occupation?: string;
+  monthlyIncome?: number;
+  financialBio?: string;
   currency: 'BRL' | 'USD' | 'EUR';
   createdAt: string;
   role: 'user';

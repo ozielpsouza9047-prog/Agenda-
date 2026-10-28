@@ -126,6 +126,7 @@ export const supabase: SupabaseClient | null = (() => {
         persistSession: true,
         autoRefreshToken: true,
         detectSessionInUrl: true,
+        storage: typeof window !== 'undefined' ? window.localStorage : undefined,
       },
     });
   } catch (err) {
@@ -274,145 +275,100 @@ async function getVerifiedSessionUser(expectedUserId?: string): Promise<User | n
 }
 
 export async function getCurrentAuthUser(): Promise<User | null> {
-  if (supabase) {
-    try {
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      if (!sessionError && session?.user) {
-        const { data: { user }, error } = await supabase.auth.getUser();
-        if (!error && user) {
-          return user;
-        }
-      }
-    } catch (err) {
-      console.error('Error getting current auth user:', err);
-    }
+  if (typeof localStorage !== 'undefined') {
+    localStorage.removeItem('divida_zero_active_session_user');
+    localStorage.removeItem('divida_zero_custom_credentials');
   }
 
-  // Fallback to active local/provisional session when email confirmation in Supabase is pending
-  if (typeof localStorage !== 'undefined') {
-    const savedUser = localStorage.getItem('divida_zero_active_session_user');
-    if (savedUser) {
-      try {
-        return JSON.parse(savedUser) as User;
-      } catch {
-        // ignore parse error
+  if (!supabase) return null;
+
+  try {
+    const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+    if (!sessionError && session?.user) {
+      const { data: { user }, error } = await supabase.auth.getUser();
+      if (!error && user) {
+        return user;
       }
+      // Preserve valid persisted session user if offline or during token refresh
+      return session.user;
     }
+  } catch (err) {
+    console.error('Error getting current auth user:', err);
   }
 
   return null;
-}
-
-export const PROVISIONAL_CREDENTIALS = {
-  email: 'acesso.dividazero@gmail.com',
-  password: 'DividaZero@2026',
-  name: 'Oziel Souza',
-};
-
-function buildFallbackSessionUser(email: string, name?: string, existingId?: string): User {
-  const cleanEmail = email.trim().toLowerCase();
-  const displayName = name || (cleanEmail === PROVISIONAL_CREDENTIALS.email ? PROVISIONAL_CREDENTIALS.name : cleanEmail.split('@')[0]);
-  return {
-    id: existingId || '00000000-0000-4000-8000-000000000001',
-    aud: 'authenticated',
-    role: 'authenticated',
-    email: cleanEmail,
-    email_confirmed_at: new Date().toISOString(),
-    app_metadata: { provider: 'email', providers: ['email'] },
-    user_metadata: { name: displayName, provisional_bypass: true },
-    identities: [],
-    created_at: new Date().toISOString(),
-  } as User;
 }
 
 export async function signInWithEmail(email: string, password: string) {
   if (!supabase) throw new Error('Supabase não está configurado. Configure as variáveis de ambiente.');
   const cleanEmail = email.trim().toLowerCase();
 
-  // Check if user customized their credentials locally in Meu Perfil
-  if (typeof localStorage !== 'undefined') {
-    const rawCustom = localStorage.getItem('divida_zero_custom_credentials');
-    if (rawCustom) {
-      try {
-        const custom = JSON.parse(rawCustom);
-        if (custom.email && custom.password && cleanEmail === custom.email.toLowerCase() && password === custom.password) {
-          // Try real Supabase login first
-          const { data, error } = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
-          if (!error && data.user && data.session) {
-            localStorage.removeItem('divida_zero_active_session_user');
-            return data;
-          }
-          const fallbackUser = buildFallbackSessionUser(cleanEmail, custom.name);
-          localStorage.setItem('divida_zero_active_session_user', JSON.stringify(fallbackUser));
-          return {
-            user: fallbackUser,
-            session: { user: fallbackUser, access_token: 'provisional_local_token' } as any,
-          };
-        }
-      } catch {
-        // ignore parse error
-      }
-    }
-  }
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email: cleanEmail,
+    password,
+  });
 
-  const { data, error } = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
   if (error) {
-    const isProvisionalMatch =
-      cleanEmail === PROVISIONAL_CREDENTIALS.email.toLowerCase() &&
-      password === PROVISIONAL_CREDENTIALS.password;
-    const isEmailNotConfirmed = Boolean(error.message?.includes('Email not confirmed'));
-
-    // If Supabase blocked login only because "Confirm email" is still enabled in the dashboard,
-    // or if the user used the provisional credentials, grant immediate access to the app
-    if (isEmailNotConfirmed || isProvisionalMatch) {
-      const fallbackUser = buildFallbackSessionUser(cleanEmail);
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem('divida_zero_active_session_user', JSON.stringify(fallbackUser));
-      }
-      return {
-        user: fallbackUser,
-        session: { user: fallbackUser, access_token: 'provisional_local_token' } as any,
-      };
-    }
-
     throw error;
   }
 
-  if (typeof localStorage !== 'undefined') {
-    localStorage.removeItem('divida_zero_active_session_user');
-  }
   return data;
 }
 
 export async function signUpWithEmail(email: string, password: string, name?: string) {
   if (!supabase) throw new Error('Supabase não está configurado. Configure as variáveis de ambiente.');
   const cleanEmail = email.trim().toLowerCase();
+  const displayName = (name || '').trim() || cleanEmail.split('@')[0];
+
   const { data, error } = await supabase.auth.signUp({
     email: cleanEmail,
     password,
     options: {
+      emailRedirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
       data: {
-        name: name || cleanEmail.split('@')[0],
+        name: displayName,
       },
     },
   });
+
   if (error) throw error;
 
-  // If Supabase created the user but requires email confirmation, activate local session immediately
-  if (data.user && !data.session && typeof localStorage !== 'undefined') {
-    const fallbackUser = buildFallbackSessionUser(cleanEmail, name, data.user.id);
-    localStorage.setItem('divida_zero_active_session_user', JSON.stringify(fallbackUser));
-    localStorage.setItem(
-      'divida_zero_custom_credentials',
-      JSON.stringify({ email: cleanEmail, password, name: name || cleanEmail.split('@')[0] })
-    );
-    return {
-      user: fallbackUser,
-      session: { user: fallbackUser, access_token: 'provisional_local_token' } as any,
-    };
+  let activeUser = data.user;
+  let activeSession = data.session;
+
+  // If the account was auto-confirmed on the database side, establish the persistent session immediately
+  if (activeUser && !activeSession) {
+    const signInAttempt = await supabase.auth.signInWithPassword({
+      email: cleanEmail,
+      password,
+    });
+    if (!signInAttempt.error && signInAttempt.data.session) {
+      activeUser = signInAttempt.data.user;
+      activeSession = signInAttempt.data.session;
+    }
   }
 
-  return data;
+  // Ensure the authenticated user's profile row exists in public.profiles (respecting RLS auth.uid() = id)
+  if (activeUser && activeSession) {
+    try {
+      await supabase.from('profiles').upsert(
+        {
+          id: activeUser.id,
+          name: displayName,
+          email: cleanEmail,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'id' }
+      );
+    } catch {
+      // Profile trigger may have already created the row
+    }
+  }
+
+  return {
+    user: activeUser,
+    session: activeSession,
+  };
 }
 
 export async function updateUserCredentials(params: {
@@ -431,55 +387,9 @@ export async function updateUserCredentials(params: {
     throw new Error('A nova senha deve ter no mínimo 6 caracteres.');
   }
 
-  // Always persist updated credentials in local session so user can log in immediately
-  if (typeof localStorage !== 'undefined') {
-    const existingRaw = localStorage.getItem('divida_zero_custom_credentials');
-    let existingCreds: any = {};
-    if (existingRaw) {
-      try {
-        existingCreds = JSON.parse(existingRaw);
-      } catch {
-        existingCreds = {};
-      }
-    }
-    const targetEmail = cleanEmail || existingCreds.email || params.currentEmail || PROVISIONAL_CREDENTIALS.email;
-    const targetPassword = cleanPassword || existingCreds.password || PROVISIONAL_CREDENTIALS.password;
-    localStorage.setItem(
-      'divida_zero_custom_credentials',
-      JSON.stringify({ email: targetEmail, password: targetPassword })
-    );
-
-    const activeRaw = localStorage.getItem('divida_zero_active_session_user');
-    if (activeRaw && cleanEmail) {
-      try {
-        const activeUser = JSON.parse(activeRaw);
-        activeUser.email = cleanEmail;
-        localStorage.setItem('divida_zero_active_session_user', JSON.stringify(activeUser));
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  // Check if user is authenticated with a full JWT in Supabase
   const verifiedUser = await getVerifiedSessionUser();
   if (!supabase || !verifiedUser) {
-    // Also try registering the new email/password in Supabase Auth in the background if both are provided
-    if (supabase && cleanEmail && cleanPassword) {
-      try {
-        await supabase.auth.signUp({
-          email: cleanEmail,
-          password: cleanPassword,
-        });
-      } catch {
-        // ignore background signup error
-      }
-    }
-    return {
-      emailUpdated: Boolean(cleanEmail),
-      passwordUpdated: Boolean(cleanPassword),
-      message: 'E-mail e senha atualizados com sucesso no seu perfil! Você já pode usar esses novos dados para entrar.',
-    };
+    throw new Error('Sessão expirada ou não autenticada. Faça login novamente para atualizar suas credenciais.');
   }
 
   let emailUpdated = false;
@@ -549,6 +459,7 @@ export async function requestPasswordReset(email: string) {
 export async function signOutUser() {
   if (typeof localStorage !== 'undefined') {
     localStorage.removeItem('divida_zero_active_session_user');
+    localStorage.removeItem('divida_zero_custom_credentials');
   }
   if (!supabase) return;
   const { error } = await supabase.auth.signOut();
@@ -556,8 +467,285 @@ export async function signOutUser() {
 }
 
 // ==========================================
-// PROFILE PERSISTENCE (RLS PROTECTED)
+// PROFILE & AVATAR STORAGE PERSISTENCE (RLS PROTECTED)
 // ==========================================
+
+export const AVATARS_BUCKET = 'avatars';
+
+export interface AvatarUploadResult {
+  avatarUrl: string;
+  storageUsed: boolean;
+  bucketConfigured: boolean;
+  message: string;
+}
+
+/**
+ * Compresses and resizes an image file in the browser using HTML5 Canvas.
+ * Ensures mobile gallery photos (which are often 4MB-12MB) upload rapidly
+ * and also provides a lightweight Data URL fallback if the Storage bucket is not yet created.
+ */
+export async function optimizeAvatarImage(
+  file: File,
+  maxDimension = 512,
+  quality = 0.85
+): Promise<{ blob: Blob; dataUrl: string; mimeType: string; ext: string }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Falha ao ler o arquivo de imagem selecionado.'));
+    reader.onload = () => {
+      const dataUrlSource = String(reader.result || '');
+      const img = new Image();
+      img.onerror = () => reject(new Error('O arquivo selecionado não é uma imagem válida.'));
+      img.onload = () => {
+        try {
+          let width = img.width || maxDimension;
+          let height = img.height || maxDimension;
+
+          if (width > height) {
+            if (width > maxDimension) {
+              height = Math.round((height * maxDimension) / width);
+              width = maxDimension;
+            }
+          } else {
+            if (height > maxDimension) {
+              width = Math.round((width * maxDimension) / height);
+              height = maxDimension;
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve({
+              blob: file,
+              dataUrl: dataUrlSource,
+              mimeType: file.type || 'image/jpeg',
+              ext: 'jpg',
+            });
+            return;
+          }
+
+          ctx.drawImage(img, 0, 0, width, height);
+          const outputMime = 'image/jpeg';
+          const optimizedDataUrl = canvas.toDataURL(outputMime, quality);
+
+          canvas.toBlob(
+            (blob) => {
+              resolve({
+                blob: blob || file,
+                dataUrl: optimizedDataUrl,
+                mimeType: outputMime,
+                ext: 'jpg',
+              });
+            },
+            outputMime,
+            quality
+          );
+        } catch {
+          resolve({
+            blob: file,
+            dataUrl: dataUrlSource,
+            mimeType: file.type || 'image/jpeg',
+            ext: 'jpg',
+          });
+        }
+      };
+      img.src = dataUrlSource;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Uploads the authenticated user's profile photo to Supabase Storage bucket 'avatars'
+ * inside the user-isolated path `<auth.uid()>/avatar-<timestamp>.jpg`, then persists
+ * the resulting URL in `public.profiles.avatar_url` and `auth.users` metadata.
+ * If the 'avatars' bucket has not been created yet in the remote Supabase project,
+ * safely persists the optimized image in `public.profiles.avatar_url` so the user's
+ * photo is never lost.
+ */
+export async function uploadProfileAvatar(
+  file: File,
+  userId: string
+): Promise<AvatarUploadResult> {
+  if (!supabase) {
+    throw new Error('Cliente Supabase não configurado.');
+  }
+
+  const verifiedUser = await getVerifiedSessionUser(userId);
+  if (!verifiedUser) {
+    throw new Error('Sessão inválida ou expirada. Faça login novamente para alterar sua foto.');
+  }
+
+  if (!file.type.startsWith('image/')) {
+    throw new Error('Selecione um arquivo de imagem válido (JPG, PNG, WEBP ou GIF) da sua galeria.');
+  }
+
+  if (file.size > 10 * 1024 * 1024) {
+    throw new Error('A imagem selecionada excede 10 MB. Escolha uma foto menor.');
+  }
+
+  // 1. Optimize image for fast mobile upload
+  const optimized = await optimizeAvatarImage(file, 512, 0.85);
+  const filePath = `${verifiedUser.id}/avatar-${Date.now()}.${optimized.ext}`;
+
+  let finalAvatarUrl = optimized.dataUrl;
+  let storageUsed = false;
+  let bucketConfigured = true;
+
+  // 2. Attempt upload to Supabase Storage bucket 'avatars' (scoped to verifiedUser.id folder)
+  try {
+    // Clean up older avatar files in the user's own folder if accessible
+    const { data: existingFiles } = await supabase.storage
+      .from(AVATARS_BUCKET)
+      .list(verifiedUser.id, { limit: 20 });
+
+    const { error: uploadError } = await supabase.storage
+      .from(AVATARS_BUCKET)
+      .upload(filePath, optimized.blob, {
+        cacheControl: '3600',
+        upsert: true,
+        contentType: optimized.mimeType,
+      });
+
+    if (!uploadError) {
+      const { data: publicUrlData } = supabase.storage
+        .from(AVATARS_BUCKET)
+        .getPublicUrl(filePath);
+
+      if (publicUrlData?.publicUrl) {
+        finalAvatarUrl = publicUrlData.publicUrl;
+        storageUsed = true;
+      }
+
+      if (existingFiles && existingFiles.length > 0) {
+        const oldPaths = existingFiles
+          .map((f) => `${verifiedUser.id}/${f.name}`)
+          .filter((p) => p !== filePath);
+        if (oldPaths.length > 0) {
+          await supabase.storage.from(AVATARS_BUCKET).remove(oldPaths);
+        }
+      }
+    } else {
+      const msg = (uploadError.message || '').toLowerCase();
+      if (
+        msg.includes('bucket not found') ||
+        msg.includes('not found') ||
+        msg.includes('row-level security') ||
+        msg.includes('permission')
+      ) {
+        bucketConfigured = false;
+      }
+    }
+  } catch {
+    bucketConfigured = false;
+  }
+
+  // 3. Persist avatar_url in public.profiles (strictly for auth.uid() = id)
+  const { error: profileError } = await supabase
+    .from('profiles')
+    .upsert(
+      {
+        id: verifiedUser.id,
+        name:
+          verifiedUser.user_metadata?.name ||
+          verifiedUser.email?.split('@')[0] ||
+          'Usuário',
+        email: verifiedUser.email || '',
+        avatar_url: finalAvatarUrl,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'id' }
+    );
+
+  if (profileError) {
+    console.warn('Warning updating avatar_url in profiles:', profileError.message);
+  }
+
+  // 4. Sync with Supabase Auth user_metadata (only if it's a public URL to keep JWT small)
+  try {
+    await supabase.auth.updateUser({
+      data: {
+        avatar_url: storageUsed ? finalAvatarUrl : '',
+      },
+    });
+  } catch {
+    // Non-fatal metadata update
+  }
+
+  return {
+    avatarUrl: finalAvatarUrl,
+    storageUsed,
+    bucketConfigured,
+    message: storageUsed
+      ? 'Foto de perfil enviada para o Supabase Storage (bucket avatars) e salva no seu perfil!'
+      : 'Foto otimizada e salva com segurança no seu perfil na nuvem (public.profiles)!',
+  };
+}
+
+/**
+ * Removes the authenticated user's profile photo from Supabase Storage and clears
+ * `avatar_url` in `public.profiles` so the default avatar is restored.
+ */
+export async function removeProfileAvatar(
+  userId: string,
+  currentAvatarUrl?: string
+): Promise<boolean> {
+  if (!supabase) return false;
+  try {
+    const verifiedUser = await getVerifiedSessionUser(userId);
+    if (!verifiedUser) return false;
+
+    // 1. Delete files inside the user's folder in 'avatars' bucket if present
+    try {
+      const { data: existingFiles } = await supabase.storage
+        .from(AVATARS_BUCKET)
+        .list(verifiedUser.id, { limit: 20 });
+
+      if (existingFiles && existingFiles.length > 0) {
+        const pathsToRemove = existingFiles.map((f) => `${verifiedUser.id}/${f.name}`);
+        await supabase.storage.from(AVATARS_BUCKET).remove(pathsToRemove);
+      } else if (currentAvatarUrl && currentAvatarUrl.includes(`/avatars/${verifiedUser.id}/`)) {
+        const pathAfterBucket = currentAvatarUrl.split('/avatars/')[1]?.split('?')[0];
+        if (pathAfterBucket && pathAfterBucket.startsWith(`${verifiedUser.id}/`)) {
+          await supabase.storage.from(AVATARS_BUCKET).remove([pathAfterBucket]);
+        }
+      }
+    } catch {
+      // Ignore if bucket is not created yet
+    }
+
+    // 2. Clear avatar_url in public.profiles for this authenticated user
+    const { error } = await supabase
+      .from('profiles')
+      .update({
+        avatar_url: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', verifiedUser.id);
+
+    if (error) {
+      console.error('Error clearing avatar in profiles:', error.message);
+      return false;
+    }
+
+    // 3. Clear in auth.users metadata
+    try {
+      await supabase.auth.updateUser({
+        data: { avatar_url: '' },
+      });
+    } catch {
+      // Non-fatal
+    }
+
+    return true;
+  } catch (err) {
+    console.error('Error removing profile avatar:', err);
+    return false;
+  }
+}
 
 export async function fetchCloudProfile(userId: string): Promise<UserProfile | null> {
   if (!supabase) return null;
@@ -578,26 +766,63 @@ export async function fetchCloudProfile(userId: string): Promise<UserProfile | n
       return null;
     }
 
-    if (!data) return null;
+    const meta = verifiedUser.user_metadata || {};
+    const rawNotif = (data?.notification_preferences && typeof data.notification_preferences === 'object')
+      ? data.notification_preferences
+      : {};
+    const personalInfo = rawNotif.personal_info || {};
+
+    if (!data) {
+      return {
+        name: meta.name || verifiedUser.email?.split('@')[0] || 'Usuário',
+        email: verifiedUser.email || '',
+        avatarUrl: meta.avatar_url || '',
+        phone: meta.phone || '',
+        occupation: meta.occupation || '',
+        monthlyIncome: Number(meta.monthly_income) || 0,
+        financialBio: meta.financial_bio || '',
+        currency: 'BRL',
+        createdAt: verifiedUser.created_at
+          ? new Date(verifiedUser.created_at).toLocaleDateString('pt-BR')
+          : 'Data não disponível',
+        role: 'user',
+        hideValuesOnDashboard: false,
+        allowAiDataAnalysis: true,
+        biometricLock: false,
+        notificationPreferences: {
+          enabled: true,
+          notify7Days: true,
+          notify3Days: true,
+          notify1Day: true,
+          notifyDueDay: true,
+          notifyOverdue: true,
+          emailSummary: false,
+        },
+      };
+    }
 
     return {
-      name: data.name || '',
-      email: data.email || '',
-      avatarUrl: data.avatar_url || '',
+      name: data.name || meta.name || verifiedUser.email?.split('@')[0] || '',
+      email: data.email || verifiedUser.email || '',
+      avatarUrl: data.avatar_url || meta.avatar_url || '',
+      phone: personalInfo.phone ?? meta.phone ?? '',
+      occupation: personalInfo.occupation ?? meta.occupation ?? '',
+      monthlyIncome: Number(personalInfo.monthlyIncome ?? meta.monthly_income ?? 0) || 0,
+      financialBio: personalInfo.financialBio ?? meta.financial_bio ?? '',
       currency: data.currency || 'BRL',
       createdAt: data.created_at ? new Date(data.created_at).toLocaleDateString('pt-BR') : 'Data não disponível',
       role: 'user',
       hideValuesOnDashboard: Boolean(data.hide_values_on_dashboard),
       allowAiDataAnalysis: data.allow_ai_data_analysis !== false,
       biometricLock: Boolean(data.biometric_lock),
-      notificationPreferences: data.notification_preferences || {
-        enabled: true,
-        notify7Days: true,
-        notify3Days: true,
-        notify1Day: true,
-        notifyDueDay: true,
-        notifyOverdue: true,
-        emailSummary: false,
+      notificationPreferences: {
+        enabled: rawNotif.enabled !== false,
+        notify7Days: rawNotif.notify7Days !== false,
+        notify3Days: rawNotif.notify3Days !== false,
+        notify1Day: rawNotif.notify1Day !== false,
+        notifyDueDay: rawNotif.notifyDueDay !== false,
+        notifyOverdue: rawNotif.notifyOverdue !== false,
+        emailSummary: Boolean(rawNotif.emailSummary),
       },
     };
   } catch (err) {
@@ -612,19 +837,32 @@ export async function saveCloudProfile(profile: UserProfile, userId: string): Pr
     const verifiedUser = await getVerifiedSessionUser(userId);
     if (!verifiedUser) return false;
 
+    const cleanName = (profile.name || '').trim() || verifiedUser.email?.split('@')[0] || 'Usuário';
+    const cleanEmail = (profile.email || verifiedUser.email || '').trim().toLowerCase();
+
+    const notificationPayload = {
+      ...profile.notificationPreferences,
+      personal_info: {
+        phone: (profile.phone || '').trim(),
+        occupation: (profile.occupation || '').trim(),
+        monthlyIncome: Number(profile.monthlyIncome) || 0,
+        financialBio: (profile.financialBio || '').trim(),
+      },
+    };
+
     const { error } = await supabase
       .from('profiles')
       .upsert(
         {
           id: verifiedUser.id,
-          name: profile.name,
-          email: verifiedUser.email || profile.email,
+          name: cleanName,
+          email: cleanEmail,
           avatar_url: profile.avatarUrl || null,
           currency: profile.currency,
           hide_values_on_dashboard: profile.hideValuesOnDashboard,
           allow_ai_data_analysis: profile.allowAiDataAnalysis,
           biometric_lock: profile.biometricLock,
-          notification_preferences: profile.notificationPreferences,
+          notification_preferences: notificationPayload,
           updated_at: new Date().toISOString(),
         },
         { onConflict: 'id' }
@@ -634,6 +872,24 @@ export async function saveCloudProfile(profile: UserProfile, userId: string): Pr
       console.error('Error saving cloud profile:', error.message);
       return false;
     }
+
+    // Sync personal metadata into Supabase Auth user_metadata as well
+    try {
+      const isPublicUrl = Boolean(profile.avatarUrl && profile.avatarUrl.startsWith('http'));
+      await supabase.auth.updateUser({
+        data: {
+          name: cleanName,
+          phone: (profile.phone || '').trim(),
+          occupation: (profile.occupation || '').trim(),
+          monthly_income: Number(profile.monthlyIncome) || 0,
+          financial_bio: (profile.financialBio || '').trim(),
+          ...(isPublicUrl ? { avatar_url: profile.avatarUrl } : {}),
+        },
+      });
+    } catch {
+      // Non-fatal metadata sync
+    }
+
     return true;
   } catch (err) {
     console.error('Error saving cloud profile:', err);
@@ -787,6 +1043,104 @@ export async function deleteCloudDebt(debtId: string, userId: string): Promise<b
     return true;
   } catch (err) {
     console.error('Exception deleting debt from Supabase:', err);
+    return false;
+  }
+}
+
+// ==========================================
+// GOALS CRUD (RLS PROTECTED)
+// ==========================================
+
+export async function fetchCloudGoals(userId: string): Promise<GoalItem[] | null> {
+  if (!supabase) return null;
+  try {
+    const verifiedUser = await getVerifiedSessionUser(userId);
+    if (!verifiedUser) return null;
+
+    const { data, error } = await supabase
+      .from('goals')
+      .select('*')
+      .eq('user_id', verifiedUser.id)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      if (error.code !== 'PGRST205' && error.code !== '42P01') {
+        console.error('Error fetching cloud goals:', error.message);
+      }
+      return null;
+    }
+
+    return (data || []).map((row: any) => ({
+      id: fromCloudScopedId(verifiedUser.id, String(row.id)),
+      title: row.title,
+      monthlyReductionGoal: Number(row.monthly_reduction_goal) || 0,
+      extraPaymentGoal: Number(row.extra_payment_goal) || 0,
+      targetPayoffDate: row.target_payoff_date,
+      createdAt: row.created_at ? String(row.created_at).split('T')[0] : new Date().toISOString().split('T')[0],
+    }));
+  } catch (err) {
+    console.error('Error in fetchCloudGoals:', err);
+    return null;
+  }
+}
+
+export async function saveCloudGoal(goal: GoalItem, userId: string): Promise<boolean> {
+  if (!supabase) return false;
+  try {
+    const verifiedUser = await getVerifiedSessionUser(userId);
+    if (!verifiedUser) return false;
+
+    const scopedId = toCloudScopedId(verifiedUser.id, goal.id);
+    const payload = {
+      id: scopedId,
+      user_id: verifiedUser.id,
+      title: goal.title,
+      monthly_reduction_goal: goal.monthlyReductionGoal,
+      extra_payment_goal: goal.extraPaymentGoal,
+      target_payoff_date: goal.targetPayoffDate,
+      updated_at: new Date().toISOString(),
+    };
+
+    let { error } = await supabase
+      .from('goals')
+      .upsert(payload, { onConflict: 'user_id,id' });
+
+    if (error && error.code === '42P10') {
+      const retry = await supabase.from('goals').upsert(payload, { onConflict: 'id' });
+      error = retry.error;
+    }
+
+    if (error) {
+      console.error('Error saving goal to Supabase:', error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('Exception saving goal to Supabase:', err);
+    return false;
+  }
+}
+
+export async function deleteCloudGoal(goalId: string, userId: string): Promise<boolean> {
+  if (!supabase) return false;
+  try {
+    const verifiedUser = await getVerifiedSessionUser(userId);
+    if (!verifiedUser) return false;
+
+    const scopedId = toCloudScopedId(verifiedUser.id, goalId);
+    const { error } = await supabase
+      .from('goals')
+      .delete()
+      .in('id', [goalId, scopedId])
+      .eq('user_id', verifiedUser.id);
+
+    if (error) {
+      console.error('Error deleting goal from Supabase:', error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('Exception deleting goal from Supabase:', err);
     return false;
   }
 }

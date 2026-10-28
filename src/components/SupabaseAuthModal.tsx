@@ -7,7 +7,6 @@ import {
   ShieldCheck,
   AlertCircle,
   Database,
-  KeyRound,
   CheckCircle2,
   Copy,
   ExternalLink,
@@ -25,7 +24,6 @@ import {
   SUPABASE_CONFIG,
   testSupabaseConnection,
   SupabaseDiagnostics,
-  PROVISIONAL_CREDENTIALS,
 } from '../lib/supabase';
 
 interface AuthenticatedProfilePreview {
@@ -566,54 +564,6 @@ alter table public.goals enable row level security;
                 </div>
               </div>
 
-              {/* Provisional Credentials 1-Tap Access */}
-              {mode === 'signin' && (
-                <div className="p-4 sm:p-5 rounded-2xl bg-purple-950/20 border border-purple-500/30 text-purple-100 space-y-2.5 transition-all">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-xs font-bold flex items-center gap-2 text-purple-300">
-                      <KeyRound className="w-4 h-4 text-purple-400" />
-                      Acesso Rápido Provisório
-                    </span>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        setEmail(PROVISIONAL_CREDENTIALS.email);
-                        setPassword(PROVISIONAL_CREDENTIALS.password);
-                        setErrorMessage(null);
-                        setIsLoading(true);
-                        try {
-                          const res = await signInWithEmail(
-                            PROVISIONAL_CREDENTIALS.email,
-                            PROVISIONAL_CREDENTIALS.password
-                          );
-                          if (res.user) {
-                            setSuccessMessage('Acesso liberado com sucesso!');
-                            setTimeout(() => {
-                              onAuthSuccess(
-                                PROVISIONAL_CREDENTIALS.email,
-                                res.user.user_metadata?.name || PROVISIONAL_CREDENTIALS.name
-                              );
-                              onClose();
-                            }, 500);
-                          }
-                        } catch (err: any) {
-                          setErrorMessage(err?.message || 'Erro ao entrar.');
-                        } finally {
-                          setIsLoading(false);
-                        }
-                      }}
-                      className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
-                    >
-                      Entrar Agora (1 Toque)
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-xs font-mono text-purple-200/90 pt-0.5">
-                    <div className="truncate">E-mail: <strong>{PROVISIONAL_CREDENTIALS.email}</strong></div>
-                    <div>Senha: <strong>{PROVISIONAL_CREDENTIALS.password}</strong></div>
-                  </div>
-                </div>
-              )}
-
               {/* Error & Success Feedback */}
               {errorMessage && (
                 <div
@@ -624,45 +574,6 @@ alter table public.goals enable row level security;
                     <AlertCircle className="w-5 h-5 shrink-0 text-rose-400 mt-0.5" />
                     <span className="leading-relaxed">{errorMessage}</span>
                   </div>
-                  {errorMessage.includes('confirmado') && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const confirmSql = `-- Confirma imediatamente a conta provisória e habilita troca de e-mail direta pelo app
-UPDATE auth.users SET email_confirmed_at = now() WHERE email = '${PROVISIONAL_CREDENTIALS.email}';
-
-CREATE OR REPLACE FUNCTION public.update_my_email_direct(new_email text)
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, auth
-AS $$
-BEGIN
-  IF auth.uid() IS NULL THEN
-    RAISE EXCEPTION 'Não autenticado';
-  END IF;
-  UPDATE auth.users
-  SET email = lower(trim(new_email)),
-      email_confirmed_at = now(),
-      updated_at = now()
-  WHERE id = auth.uid();
-  UPDATE public.profiles
-  SET email = lower(trim(new_email)),
-      updated_at = now()
-  WHERE id = auth.uid();
-END;
-$$;
-GRANT EXECUTE ON FUNCTION public.update_my_email_direct(text) TO authenticated;`;
-                        navigator.clipboard.writeText(confirmSql);
-                        setCopiedSql(true);
-                        setTimeout(() => setCopiedSql(false), 3000);
-                      }}
-                      className="w-full py-2.5 px-3 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 text-xs font-semibold flex items-center justify-center gap-2 transition-all"
-                    >
-                      {copiedSql ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                      <span>{copiedSql ? 'SQL de Liberação Copiado! Cole no SQL Editor' : 'Copiar SQL de Liberação Imediata'}</span>
-                    </button>
-                  )}
                 </div>
               )}
 

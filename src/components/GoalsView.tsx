@@ -1,24 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { DebtItem } from '../types';
-import { Target, Plus, CheckCircle2, Trash2, Edit3, ShieldCheck, Trophy, Calendar, TrendingDown } from 'lucide-react';
-
-interface GoalItem {
-  id: string;
-  title: string;
-  monthlyReductionGoal: number;
-  extraPaymentGoal: number;
-  targetPayoffDate: string;
-  createdAt: string;
-}
+import { DebtItem, GoalItem } from '../types';
+import { fetchCloudGoals, saveCloudGoal, deleteCloudGoal } from '../lib/supabase';
+import { Target, Plus, Trash2, Edit3, Calendar } from 'lucide-react';
 
 interface GoalsViewProps {
   debts: DebtItem[];
   isDark: boolean;
+  userId?: string;
 }
 
-export const GoalsView: React.FC<GoalsViewProps> = ({ debts, isDark }) => {
+export const GoalsView: React.FC<GoalsViewProps> = ({ debts, isDark, userId }) => {
+  const storageKey = userId ? `divida_zero_goals_${userId}` : 'divida_zero_goals';
+
   const [goals, setGoals] = useState<GoalItem[]>(() => {
-    const saved = localStorage.getItem('divida_zero_goals');
+    const saved = localStorage.getItem(storageKey) || localStorage.getItem('divida_zero_goals');
     if (saved) {
       try {
         return JSON.parse(saved);
@@ -26,16 +21,7 @@ export const GoalsView: React.FC<GoalsViewProps> = ({ debts, isDark }) => {
         console.error('Failed to parse goals', e);
       }
     }
-    return [
-      {
-        id: 'goal-1',
-        title: 'Quitação do Cartão Black',
-        monthlyReductionGoal: 1500,
-        extraPaymentGoal: 400,
-        targetPayoffDate: '2026-12-15',
-        createdAt: '2026-10-01'
-      }
-    ];
+    return [];
   });
 
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -46,14 +32,29 @@ export const GoalsView: React.FC<GoalsViewProps> = ({ debts, isDark }) => {
   const [editingId, setEditingId] = useState<string | null>(null);
 
   useEffect(() => {
+    let isMounted = true;
+    if (userId) {
+      fetchCloudGoals(userId).then((cloudGoals) => {
+        if (isMounted && cloudGoals && cloudGoals.length > 0) {
+          setGoals(cloudGoals);
+        }
+      });
+    }
+    return () => {
+      isMounted = false;
+    };
+  }, [userId]);
+
+  useEffect(() => {
+    localStorage.setItem(storageKey, JSON.stringify(goals));
     localStorage.setItem('divida_zero_goals', JSON.stringify(goals));
-  }, [goals]);
+  }, [goals, storageKey]);
 
   const formatCurrency = (val: number) => {
     return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val);
   };
 
-  const handleSaveGoal = (e: React.FormEvent) => {
+  const handleSaveGoal = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
 
@@ -75,11 +76,16 @@ export const GoalsView: React.FC<GoalsViewProps> = ({ debts, isDark }) => {
     setIsModalOpen(false);
     setEditingId(null);
     setTitle('');
+
+    if (userId) {
+      await saveCloudGoal(newItem, userId);
+    }
   };
 
-  const handleDeleteGoal = (id: string) => {
-    if (window.confirm('Tem certeza de que deseja excluir esta meta?')) {
-      setGoals(goals.filter(g => g.id !== id));
+  const handleDeleteGoal = async (id: string) => {
+    setGoals(goals.filter(g => g.id !== id));
+    if (userId) {
+      await deleteCloudGoal(id, userId);
     }
   };
 
