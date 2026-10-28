@@ -1,8 +1,8 @@
-import React from 'react';
+import React, { useRef, useState } from 'react';
 import { MetricCards } from './MetricCards';
-import { FinancialSummary, DebtItem } from '../types';
-import { aiRecommendations } from '../mockData';
-import { Sparkles, ArrowRight, ChevronRight, Plus, Zap } from 'lucide-react';
+import { FinancialSummary, DebtItem, UserProfile } from '../types';
+import { uploadProfileAvatar, buildDynamicAiRecommendation } from '../lib/supabase';
+import { Sparkles, ArrowRight, ChevronRight, Plus, Zap, Camera, User, Loader2 } from 'lucide-react';
 
 interface DashboardViewProps {
   summary: FinancialSummary;
@@ -11,6 +11,9 @@ interface DashboardViewProps {
   onOpenAddDebt: () => void;
   setActiveTab: (tab: any) => void;
   hideValues?: boolean;
+  userProfile?: UserProfile;
+  userId?: string;
+  onUpdateProfile?: (updated: UserProfile) => Promise<void> | void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -20,10 +23,58 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onOpenAddDebt,
   setActiveTab,
   hideValues = false,
+  userProfile,
+  userId,
+  onUpdateProfile,
 }) => {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
+
   const formatCurrency = (val: number) => {
     if (hideValues) return '••••••';
     return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val);
+  };
+
+  const getInitials = (n: string) => {
+    const clean = (n || '').trim();
+    if (!clean) return 'DZ';
+    const parts = clean.split(/\s+/);
+    if (parts.length >= 2) {
+      return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    }
+    return clean.slice(0, 2).toUpperCase();
+  };
+
+  const handleQuickAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !userProfile || !onUpdateProfile) return;
+    e.target.value = '';
+
+    if (!file.type.startsWith('image/')) return;
+    setIsUploadingPhoto(true);
+    try {
+      if (userId) {
+        const result = await uploadProfileAvatar(file, userId, userProfile.name);
+        await onUpdateProfile({
+          ...userProfile,
+          avatarUrl: result.avatarUrl,
+        });
+      } else {
+        const reader = new FileReader();
+        reader.onload = async (ev) => {
+          const dataUrl = String(ev.target?.result || '');
+          await onUpdateProfile({
+            ...userProfile,
+            avatarUrl: dataUrl,
+          });
+        };
+        reader.readAsDataURL(file);
+      }
+    } catch (err) {
+      console.error('Error uploading avatar from home screen:', err);
+    } finally {
+      setIsUploadingPhoto(false);
+    }
   };
 
   const getStatusBadge = (status: DebtItem['status']) => {
@@ -39,8 +90,96 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     }
   };
 
+  const displayName = userProfile?.name || 'Usuário';
+  const displayAvatar = userProfile?.avatarUrl || '';
+  const dynamicAiRec = buildDynamicAiRecommendation(debts, userProfile);
+
   return (
     <div className="space-y-6 pb-20 md:pb-8">
+      {/* User Profile Bar on the Home Screen (Tela Inicial) */}
+      <div
+        className={`p-4 sm:p-5 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all ${
+          isDark
+            ? 'bg-neutral-900/90 border-neutral-800 shadow-[0_8px_30px_rgba(0,0,0,0.35)]'
+            : 'bg-white border-slate-200 shadow-sm'
+        }`}
+      >
+        <div className="flex items-center gap-3.5 min-w-0">
+          <div className="relative group shrink-0">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handleQuickAvatarChange}
+            />
+            <button
+              type="button"
+              disabled={isUploadingPhoto}
+              onClick={() => fileInputRef.current?.click()}
+              className="relative block focus:outline-none"
+              title="Toque para selecionar uma foto da galeria"
+            >
+              {isUploadingPhoto ? (
+                <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-full bg-neutral-900 border-2 border-purple-500 flex items-center justify-center text-purple-400">
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                </div>
+              ) : displayAvatar ? (
+                <img
+                  src={displayAvatar}
+                  alt={displayName}
+                  className="w-12 h-12 sm:w-14 sm:h-14 rounded-full object-cover border-2 border-purple-500 shadow-[0_0_18px_rgba(168,85,247,0.35)]"
+                />
+              ) : (
+                <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-full bg-gradient-to-tr from-purple-600 via-purple-500 to-indigo-600 flex items-center justify-center text-white font-extrabold text-base border-2 border-purple-400/40 shadow-md">
+                  {getInitials(displayName)}
+                </div>
+              )}
+              <span className="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full bg-purple-600 text-white flex items-center justify-center border border-purple-300/40 shadow-sm">
+                <Camera className="w-2.5 h-2.5" />
+              </span>
+            </button>
+          </div>
+
+          <div className="min-w-0">
+            <p className="text-[11px] font-mono uppercase tracking-wider text-purple-400">
+              Painel Pessoal · Dívida Zero AI
+            </p>
+            <h2 className={`text-base sm:text-lg font-bold truncate ${isDark ? 'text-white' : 'text-slate-900'}`}>
+              Olá, {displayName}
+            </h2>
+            <p className="text-xs opacity-65 truncate">
+              {userProfile?.email || 'Resumo financeiro sincronizado na sua conta'}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            disabled={isUploadingPhoto}
+            onClick={() => fileInputRef.current?.click()}
+            className="px-3.5 py-2 rounded-xl text-xs font-semibold bg-purple-600 hover:bg-purple-500 text-white shadow-sm flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
+          >
+            <Camera className="w-3.5 h-3.5" />
+            <span>{displayAvatar ? 'Trocar Foto' : 'Foto da Galeria'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('profile')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-semibold border flex items-center justify-center gap-1.5 transition-all ${
+              isDark
+                ? 'bg-neutral-950 border-neutral-800 text-purple-300 hover:border-purple-500/50 hover:bg-purple-500/10'
+                : 'bg-slate-50 border-slate-200 text-purple-700 hover:bg-purple-50'
+            }`}
+          >
+            <User className="w-3.5 h-3.5 text-purple-400" />
+            <span>Meu Perfil</span>
+          </button>
+        </div>
+      </div>
+
       {/* 5 Core Metric Cards */}
       <MetricCards summary={summary} isDark={isDark} hideValues={hideValues} />
 
@@ -60,15 +199,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <div>
               <div className="flex items-center gap-2 mb-1">
                 <span className="px-2 py-0.5 text-[10px] font-mono font-bold tracking-wider rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                  DICA DE QUITAÇÃO IA
+                  {dynamicAiRec.tag.toUpperCase()}
                 </span>
-                <span className="text-xs opacity-60">Atualizado hoje</span>
+                <span className="text-xs opacity-60">Dados reais da sua conta</span>
               </div>
               <h2 className={`text-base md:text-lg font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                {aiRecommendations[0].title}
+                {dynamicAiRec.title}
               </h2>
               <p className="text-xs md:text-sm opacity-80 mt-1 max-w-2xl">
-                {aiRecommendations[0].description}
+                {dynamicAiRec.description}
               </p>
             </div>
           </div>

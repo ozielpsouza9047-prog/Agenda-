@@ -222,12 +222,7 @@ export default function App() {
           if (event === 'PASSWORD_RECOVERY') {
             setActiveTab('profile');
           }
-          if (
-            event === 'INITIAL_SESSION' ||
-            event === 'SIGNED_IN' ||
-            event === 'TOKEN_REFRESHED' ||
-            event === 'USER_UPDATED'
-          ) {
+          if (event === 'INITIAL_SESSION' || event === 'SIGNED_IN') {
             await loadAuthenticatedUserData(session.user);
           }
         } else if (event === 'SIGNED_OUT') {
@@ -478,6 +473,9 @@ export default function App() {
               }}
               setActiveTab={setActiveTab}
               hideValues={userProfile.hideValuesOnDashboard}
+              userProfile={userProfile}
+              userId={authUser.id}
+              onUpdateProfile={handleUpdateProfile}
             />
           )}
 
@@ -511,7 +509,13 @@ export default function App() {
           )}
 
           {activeTab === 'ai_advisor' && (
-            <AIAssistantView debts={debts} isDark={isDark} />
+            <AIAssistantView
+              debts={debts}
+              isDark={isDark}
+              userId={authUser.id}
+              userProfile={userProfile}
+              onNavigateTab={setActiveTab}
+            />
           )}
 
           {activeTab === 'profile' && (
@@ -543,7 +547,12 @@ export default function App() {
       </div>
 
       {/* Mobile Bottom Navigation */}
-      <BottomNav activeTab={activeTab} setActiveTab={setActiveTab} isDark={isDark} />
+      <BottomNav
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
+        isDark={isDark}
+        userProfile={userProfile}
+      />
 
       {/* Add / Edit Debt Modal */}
       <AddDebtModal

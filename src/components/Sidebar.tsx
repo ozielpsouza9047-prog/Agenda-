@@ -48,14 +48,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
   ];
 
   const getInitials = (n: string) => {
-    const parts = n.trim().split(' ');
+    const clean = (n || '').trim();
+    if (!clean) return 'DZ';
+    const parts = clean.split(/\s+/);
     if (parts.length >= 2) {
       return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
     }
-    return n.slice(0, 2).toUpperCase();
+    return clean.slice(0, 2).toUpperCase();
   };
 
-  const userName = userProfile?.name || 'Oziel Souza';
+  const userName = userProfile?.name || 'Usuário';
 
   const handleSelectTab = (tab: ActiveTab) => {
     setActiveTab(tab);
@@ -151,6 +153,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {menuItems.map((item) => {
             const Icon = item.icon;
             const isActive = activeTab === item.id;
+            const isProfileItem = item.id === 'profile' && Boolean(userProfile?.avatarUrl);
             return (
               <button
                 key={item.id}
@@ -173,11 +176,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 }`}
               >
                 <div className="flex items-center gap-3 min-w-0">
-                  <Icon
-                    className={`w-5 h-5 shrink-0 ${
-                      isActive ? 'text-purple-400' : 'opacity-75'
-                    }`}
-                  />
+                  {isProfileItem ? (
+                    <img
+                      src={userProfile!.avatarUrl}
+                      alt={userName}
+                      className="w-5 h-5 rounded-full object-cover border border-purple-400 shrink-0"
+                    />
+                  ) : (
+                    <Icon
+                      className={`w-5 h-5 shrink-0 ${
+                        isActive ? 'text-purple-400' : 'opacity-75'
+                      }`}
+                    />
+                  )}
                   {!isCollapsed && (
                     <span className="whitespace-nowrap truncate">{item.label}</span>
                   )}

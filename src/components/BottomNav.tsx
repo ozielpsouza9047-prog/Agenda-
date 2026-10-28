@@ -1,14 +1,20 @@
 import React from 'react';
 import { LayoutDashboard, Wallet, Calendar, Sparkles, User } from 'lucide-react';
-import { ActiveTab } from '../types';
+import { ActiveTab, UserProfile } from '../types';
 
 interface BottomNavProps {
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
   isDark: boolean;
+  userProfile?: UserProfile;
 }
 
-export const BottomNav: React.FC<BottomNavProps> = ({ activeTab, setActiveTab, isDark }) => {
+export const BottomNav: React.FC<BottomNavProps> = ({
+  activeTab,
+  setActiveTab,
+  isDark,
+  userProfile,
+}) => {
   const navItems = [
     { id: 'dashboard' as ActiveTab, label: 'Início', icon: LayoutDashboard },
     { id: 'debts' as ActiveTab, label: 'Dívidas', icon: Wallet },
@@ -27,6 +33,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({ activeTab, setActiveTab, i
       {navItems.map((item) => {
         const Icon = item.icon;
         const isActive = activeTab === item.id;
+        const isProfileWithAvatar = item.id === 'profile' && Boolean(userProfile?.avatarUrl);
         return (
           <button
             key={item.id}
@@ -39,7 +46,17 @@ export const BottomNav: React.FC<BottomNavProps> = ({ activeTab, setActiveTab, i
                 : 'hover:text-slate-900'
             }`}
           >
-            <Icon className={`w-5 h-5 mb-0.5 ${isActive ? 'text-purple-400' : 'opacity-70'}`} />
+            {isProfileWithAvatar ? (
+              <img
+                src={userProfile!.avatarUrl}
+                alt={userProfile?.name || 'Perfil'}
+                className={`w-5 h-5 mb-0.5 rounded-full object-cover border ${
+                  isActive ? 'border-purple-400' : 'border-neutral-600'
+                }`}
+              />
+            ) : (
+              <Icon className={`w-5 h-5 mb-0.5 ${isActive ? 'text-purple-400' : 'opacity-70'}`} />
+            )}
             <span className="text-[10px] tracking-tight">{item.label}</span>
           </button>
         );
@@ -47,3 +64,4 @@ export const BottomNav: React.FC<BottomNavProps> = ({ activeTab, setActiveTab, i
     </nav>
   );
 };
+

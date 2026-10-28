@@ -239,11 +239,12 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     setIsUploadingAvatar(true);
     try {
       if (userId) {
-        const result = await uploadProfileAvatar(file, userId);
+        const currentDisplayName = name.trim() || profile.name;
+        const result = await uploadProfileAvatar(file, userId, currentDisplayName);
         setAvatarUrl(result.avatarUrl);
         const updated: UserProfile = {
           ...profile,
-          name: name.trim() || profile.name,
+          name: currentDisplayName,
           email: email.trim() || profile.email,
           avatarUrl: result.avatarUrl,
           phone: phone.trim(),

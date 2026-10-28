@@ -2,11 +2,24 @@ import { createClient, SupabaseClient, User } from '@supabase/supabase-js';
 import { DebtItem, GoalItem, UserProfile } from '../types';
 
 // Retrieve environment variables (isomorphic for Vite browser and Node/testing)
-const env = typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env : (typeof process !== 'undefined' ? process.env : {});
-const DEFAULT_SUPABASE_URL = 'https://ihjpxxlotdmxvrccbukf.supabase.co';
-const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_rb7DK-hVidb3_zgYFE00jw_3GcU2BgI';
-const rawSupabaseUrl = (env.VITE_SUPABASE_URL || '').trim();
-const rawSupabaseAnonKey = (env.VITE_SUPABASE_ANON_KEY || '').trim();
+const viteEnv: Record<string, any> =
+  typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env : {};
+const nodeEnv: Record<string, any> =
+  typeof process !== 'undefined' && process.env ? process.env : {};
+
+const sanitizeEnvValue = (val: unknown): string =>
+  String(val ?? '')
+    .trim()
+    .replace(/^['"]+|['"]+$/g, '')
+    .trim();
+
+const rawSupabaseUrl = sanitizeEnvValue(
+  viteEnv.VITE_SUPABASE_URL || nodeEnv.VITE_SUPABASE_URL || ''
+).replace(/\/+$/, '');
+
+const rawSupabaseAnonKey = sanitizeEnvValue(
+  viteEnv.VITE_SUPABASE_ANON_KEY || nodeEnv.VITE_SUPABASE_ANON_KEY || ''
+);
 
 /**
  * Checks if a value is an unconfigured placeholder or literal variable name.
@@ -27,7 +40,8 @@ export const isPlaceholderOrLiteral = (value: string): boolean => {
     clean.includes('placeholder') ||
     clean === 'undefined' ||
     clean === 'null' ||
-    clean === 'coloque_aqui_sua_chave_publica_sb_publishable'
+    clean === 'coloque_aqui_sua_chave_publica_sb_publishable' ||
+    clean === 'coloque_aqui_sua_chave_publica_anon_ou_sb_publishable'
   );
 };
 
@@ -80,12 +94,8 @@ export const isValidPublicKey = (key: string): boolean => {
   return isPublishable || isJwt;
 };
 
-const supabaseUrl = isValidSupabaseUrl(rawSupabaseUrl) ? rawSupabaseUrl : DEFAULT_SUPABASE_URL;
-const supabaseAnonKey = isSecretKey(rawSupabaseAnonKey)
-  ? rawSupabaseAnonKey
-  : isValidPublicKey(rawSupabaseAnonKey)
-  ? rawSupabaseAnonKey
-  : DEFAULT_SUPABASE_ANON_KEY;
+const supabaseUrl = isValidSupabaseUrl(rawSupabaseUrl) ? rawSupabaseUrl : '';
+const supabaseAnonKey = rawSupabaseAnonKey;
 
 // Check if credentials are validly provided for live operation
 export const isSupabaseConfigured = (): boolean => {
@@ -95,7 +105,7 @@ export const isSupabaseConfigured = (): boolean => {
   );
 };
 
-// Configuration inspection state
+// Configuration inspection state (never exposes the key value)
 export const SUPABASE_CONFIG = {
   url: supabaseUrl,
   hasUrl: isValidSupabaseUrl(supabaseUrl),
@@ -568,7 +578,8 @@ export async function optimizeAvatarImage(
  */
 export async function uploadProfileAvatar(
   file: File,
-  userId: string
+  userId: string,
+  currentName?: string
 ): Promise<AvatarUploadResult> {
   if (!supabase) {
     throw new Error('Cliente Supabase não configurado.');
@@ -643,16 +654,38 @@ export async function uploadProfileAvatar(
     bucketConfigured = false;
   }
 
-  // 3. Persist avatar_url in public.profiles (strictly for auth.uid() = id)
+  const resolvedName =
+    (currentName || '').trim() ||
+    verifiedUser.user_metadata?.name ||
+    verifiedUser.email?.split('@')[0] ||
+    'Usuário';
+
+  // 3. Immediately update local user-scoped profile cache so any auth event sees the new photo & name
+  if (typeof localStorage !== 'undefined') {
+    const userProfileKey = `divida_zero_profile_${verifiedUser.id}`;
+    try {
+      const existingRaw = localStorage.getItem(userProfileKey) || localStorage.getItem('divida_zero_profile');
+      const existingObj = existingRaw ? JSON.parse(existingRaw) : {};
+      const updatedCache = {
+        ...existingObj,
+        name: resolvedName,
+        email: verifiedUser.email || existingObj.email || '',
+        avatarUrl: finalAvatarUrl,
+      };
+      localStorage.setItem(userProfileKey, JSON.stringify(updatedCache));
+      localStorage.setItem('divida_zero_profile', JSON.stringify(updatedCache));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }
+
+  // 4. Persist avatar_url and name in public.profiles (strictly for auth.uid() = id)
   const { error: profileError } = await supabase
     .from('profiles')
     .upsert(
       {
         id: verifiedUser.id,
-        name:
-          verifiedUser.user_metadata?.name ||
-          verifiedUser.email?.split('@')[0] ||
-          'Usuário',
+        name: resolvedName,
         email: verifiedUser.email || '',
         avatar_url: finalAvatarUrl,
         updated_at: new Date().toISOString(),
@@ -662,14 +695,21 @@ export async function uploadProfileAvatar(
 
   if (profileError) {
     console.warn('Warning updating avatar_url in profiles:', profileError.message);
+    if (!storageUsed) {
+      throw new Error(`Falha ao salvar a foto no perfil na nuvem (${profileError.code || 'RLS'}): ${profileError.message}`);
+    }
   }
 
-  // 4. Sync with Supabase Auth user_metadata (only if it's a public URL to keep JWT small)
+  // 5. Sync with Supabase Auth user_metadata (only set avatar_url if it's a public URL to keep JWT small)
   try {
+    const metadataUpdate: Record<string, any> = {
+      name: resolvedName,
+    };
+    if (storageUsed && finalAvatarUrl.startsWith('http')) {
+      metadataUpdate.avatar_url = finalAvatarUrl;
+    }
     await supabase.auth.updateUser({
-      data: {
-        avatar_url: storageUsed ? finalAvatarUrl : '',
-      },
+      data: metadataUpdate,
     });
   } catch {
     // Non-fatal metadata update
@@ -731,7 +771,23 @@ export async function removeProfileAvatar(
       return false;
     }
 
-    // 3. Clear in auth.users metadata
+    // 3. Clear avatarUrl in local user-scoped profile cache
+    if (typeof localStorage !== 'undefined') {
+      const userProfileKey = `divida_zero_profile_${verifiedUser.id}`;
+      try {
+        const existingRaw = localStorage.getItem(userProfileKey) || localStorage.getItem('divida_zero_profile');
+        if (existingRaw) {
+          const existingObj = JSON.parse(existingRaw);
+          const updatedCache = { ...existingObj, avatarUrl: '' };
+          localStorage.setItem(userProfileKey, JSON.stringify(updatedCache));
+          localStorage.setItem('divida_zero_profile', JSON.stringify(updatedCache));
+        }
+      } catch {
+        // Ignore storage errors
+      }
+    }
+
+    // 4. Clear in auth.users metadata
     try {
       await supabase.auth.updateUser({
         data: { avatar_url: '' },
@@ -773,8 +829,23 @@ export async function fetchCloudProfile(userId: string): Promise<UserProfile | n
     const personalInfo = rawNotif.personal_info || {};
 
     if (!data) {
+      const initialName = meta.name || verifiedUser.email?.split('@')[0] || 'Usuário';
+      try {
+        await supabase.from('profiles').upsert(
+          {
+            id: verifiedUser.id,
+            name: initialName,
+            email: verifiedUser.email || '',
+            avatar_url: meta.avatar_url || null,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'id' }
+        );
+      } catch {
+        // Ignore if trigger already created row concurrently
+      }
       return {
-        name: meta.name || verifiedUser.email?.split('@')[0] || 'Usuário',
+        name: initialName,
         email: verifiedUser.email || '',
         avatarUrl: meta.avatar_url || '',
         phone: meta.phone || '',
@@ -801,8 +872,14 @@ export async function fetchCloudProfile(userId: string): Promise<UserProfile | n
       };
     }
 
+    const dbName = (data.name || '').trim();
+    const resolvedName =
+      dbName && dbName !== 'Usuário Dívida Zero'
+        ? dbName
+        : meta.name || dbName || verifiedUser.email?.split('@')[0] || 'Usuário';
+
     return {
-      name: data.name || meta.name || verifiedUser.email?.split('@')[0] || '',
+      name: resolvedName,
       email: data.email || verifiedUser.email || '',
       avatarUrl: data.avatar_url || meta.avatar_url || '',
       phone: personalInfo.phone ?? meta.phone ?? '',
@@ -1508,4 +1585,964 @@ export async function migrateLocalDebtsToSupabase(
   result.hasErrors = result.failed > 0 || result.errors.length > 0;
   return result;
 }
+
+// ==========================================
+// FINANCIAL AI ASSISTANT & GEMINI INTEGRATION (USER-ISOLATED, ZERO HALLUCINATION)
+// Helps the authenticated user organize debts, analyze installments, plan payments,
+// and understand payoff strategies (Avalanche, Bola de Neve, Vencimento) using
+// strictly their own authenticated records.
+// ==========================================
+
+export interface CategoryBreakdownItem {
+  category: string;
+  count: number;
+  remainingAmount: number;
+  monthlyPayment: number;
+  sharePercent: number;
+}
+
+export interface StrategyRankingItem {
+  position: number;
+  id: string;
+  title: string;
+  creditor: string;
+  category: string;
+  remainingAmount: number;
+  monthlyPayment: number;
+  interestRate: number;
+  estimatedMonthlyInterestCost: number;
+  dueDate: string;
+  status: DebtItem['status'];
+  installmentsRemaining: number;
+}
+
+export interface UserFinancialAnalysis {
+  hasActiveDebts: boolean;
+  totalDebtsCount: number;
+  activeDebtsCount: number;
+  settledDebtsCount: number;
+  overdueCount: number;
+  overdueAmount: number;
+  upcomingDueCount: number;
+  upcomingDueAmount: number;
+  onTimeCount: number;
+  onTimeAmount: number;
+  totalOriginalAmount: number;
+  totalRemainingAmount: number;
+  totalAmortizedAmount: number;
+  amortizedPercent: number;
+  totalMonthlyPayment: number;
+  totalEstimatedMonthlyInterest: number;
+  totalInstallmentsContracted: number;
+  totalInstallmentsPaid: number;
+  totalInstallmentsRemaining: number;
+  monthlyIncome: number;
+  hasConfiguredIncome: boolean;
+  incomeCommitmentPercent: number | null;
+  extraMonthlyTarget: number;
+  hasConfiguredExtraTarget: boolean;
+  debtsWithoutMonthlyPayment: string[];
+  debtsWithoutInterestRate: string[];
+  canCalculateExactPayoffTimeline: boolean;
+  standardPayoffMonths: number | null;
+  acceleratedPayoffMonths: number | null;
+  monthsSavedWithExtra: number | null;
+  missingDataForCompletePlan: string[];
+  dueNext7Days: DebtItem[];
+  dueNext30Days: DebtItem[];
+  categories: CategoryBreakdownItem[];
+  avalancheOrder: StrategyRankingItem[];
+  snowballOrder: StrategyRankingItem[];
+  urgencyOrder: StrategyRankingItem[];
+  activeGoalsCount: number;
+}
+
+export interface AiChatMessage {
+  sender: 'user' | 'ai';
+  text: string;
+}
+
+export interface AiConversationSession {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: AiChatMessage[];
+}
+
+export interface AskFinancialAssistantParams {
+  prompt: string;
+  userId?: string;
+  debts: DebtItem[];
+  goals?: GoalItem[];
+  profile?: UserProfile;
+  history?: AiChatMessage[];
+}
+
+export interface AskFinancialAssistantResult {
+  reply: string;
+  source: 'gemini' | 'local_engine' | 'privacy_restricted';
+  analysis: UserFinancialAnalysis;
+}
+
+function formatBRL(value: number, currency: string = 'BRL'): string {
+  try {
+    return new Intl.NumberFormat('pt-BR', {
+      style: 'currency',
+      currency: currency || 'BRL',
+      minimumFractionDigits: 2,
+    }).format(Number(value) || 0);
+  } catch {
+    return `R$ ${(Number(value) || 0).toFixed(2)}`;
+  }
+}
+
+/**
+ * Returns the storage key strictly isolated for the authenticated user's AI conversations.
+ */
+export function getUserConversationsStorageKey(userId?: string): string | null {
+  const cleanId = (userId || '').trim();
+  if (!cleanId) return null;
+  return `divida_zero_ai_conversations_${cleanId}`;
+}
+
+/**
+ * Loads all saved AI conversations for the authenticated user.
+ * Migrates any legacy single-session chat if present for the same userId.
+ */
+export function loadUserAiConversations(
+  userId: string | undefined,
+  initialMessage: AiChatMessage
+): AiConversationSession[] {
+  const storageKey = getUserConversationsStorageKey(userId);
+  const nowIso = new Date().toISOString();
+  const defaultSession: AiConversationSession = {
+    id: `conv-${Date.now()}`,
+    title: 'Conversa 1',
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    messages: [initialMessage],
+  };
+
+  if (!storageKey || typeof localStorage === 'undefined') {
+    return [defaultSession];
+  }
+
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const valid = parsed.filter(
+          (c: any) => c && typeof c.id === 'string' && Array.isArray(c.messages) && c.messages.length > 0
+        );
+        if (valid.length > 0) {
+          return valid;
+        }
+      }
+    }
+
+    // Check if there was a session in sessionStorage for this same userId
+    if (typeof sessionStorage !== 'undefined' && userId) {
+      const legacyRaw = sessionStorage.getItem(`divida_zero_ai_chat_${userId}`);
+      if (legacyRaw) {
+        const legacyMsgs = JSON.parse(legacyRaw);
+        if (Array.isArray(legacyMsgs) && legacyMsgs.length > 0) {
+          const migrated: AiConversationSession = {
+            ...defaultSession,
+            messages: legacyMsgs,
+          };
+          localStorage.setItem(storageKey, JSON.stringify([migrated]));
+          return [migrated];
+        }
+      }
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+
+  return [defaultSession];
+}
+
+/**
+ * Persists the authenticated user's conversations in user-isolated storage.
+ */
+export function saveUserAiConversations(
+  userId: string | undefined,
+  conversations: AiConversationSession[]
+): void {
+  const storageKey = getUserConversationsStorageKey(userId);
+  if (!storageKey || typeof localStorage === 'undefined') return;
+  try {
+    const trimmed = conversations.slice(0, 15).map((c) => ({
+      ...c,
+      messages: (c.messages || []).slice(-30),
+    }));
+    localStorage.setItem(storageKey, JSON.stringify(trimmed));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+/**
+ * Computes a complete, deterministic financial analysis strictly from the user's real debts,
+ * goals, and profile. Never invents or assumes values when data is missing.
+ */
+export function buildUserFinancialAnalysis(
+  debts: DebtItem[],
+  goals: GoalItem[] = [],
+  profile?: UserProfile
+): UserFinancialAnalysis {
+  const safeDebts = Array.isArray(debts) ? debts : [];
+  const safeGoals = Array.isArray(goals) ? goals : [];
+
+  const activeDebts = safeDebts.filter((d) => d.status !== 'quitado');
+  const settledDebts = safeDebts.filter((d) => d.status === 'quitado');
+  const overdueDebts = activeDebts.filter((d) => d.status === 'atrasado');
+  const upcomingDueDebts = activeDebts.filter((d) => d.status === 'proximo_vencimento');
+  const onTimeDebts = activeDebts.filter((d) => d.status === 'em_dia');
+
+  const totalOriginalAmount = safeDebts.reduce((acc, d) => acc + (Number(d.totalAmount) || 0), 0);
+  const totalRemainingAmount = activeDebts.reduce((acc, d) => acc + (Number(d.remainingAmount) || 0), 0);
+  const totalAmortizedAmount = Math.max(0, totalOriginalAmount - totalRemainingAmount);
+  const amortizedPercent =
+    totalOriginalAmount > 0 ? Math.min(100, Math.round((totalAmortizedAmount / totalOriginalAmount) * 100)) : 0;
+
+  const totalMonthlyPayment = activeDebts.reduce((acc, d) => acc + (Number(d.monthlyPayment) || 0), 0);
+  const overdueAmount = overdueDebts.reduce((acc, d) => acc + (Number(d.remainingAmount) || 0), 0);
+  const upcomingDueAmount = upcomingDueDebts.reduce((acc, d) => acc + (Number(d.remainingAmount) || 0), 0);
+  const onTimeAmount = onTimeDebts.reduce((acc, d) => acc + (Number(d.remainingAmount) || 0), 0);
+
+  const totalEstimatedMonthlyInterest = activeDebts.reduce((acc, d) => {
+    const rate = Math.max(0, Number(d.interestRate) || 0);
+    const rem = Math.max(0, Number(d.remainingAmount) || 0);
+    return acc + rem * (rate / 100);
+  }, 0);
+
+  const totalInstallmentsContracted = activeDebts.reduce(
+    (acc, d) => acc + Math.max(1, Number(d.installmentsTotal) || 1),
+    0
+  );
+  const totalInstallmentsPaid = activeDebts.reduce(
+    (acc, d) => acc + Math.max(0, Number(d.installmentsPaid) || 0),
+    0
+  );
+  const totalInstallmentsRemaining = activeDebts.reduce((acc, d) => {
+    const total = Math.max(1, Number(d.installmentsTotal) || 1);
+    const paid = Math.max(0, Number(d.installmentsPaid) || 0);
+    return acc + Math.max(0, total - paid);
+  }, 0);
+
+  const monthlyIncome = Math.max(0, Number(profile?.monthlyIncome) || 0);
+  const hasConfiguredIncome = monthlyIncome > 0;
+  const incomeCommitmentPercent =
+    hasConfiguredIncome ? Math.round((totalMonthlyPayment / monthlyIncome) * 1000) / 10 : null;
+
+  // Only use an extra monthly payment target if the user actually registered it in their goals
+  const extraFromGoals = safeGoals.reduce((acc, g) => acc + (Number(g.extraPaymentGoal) || 0), 0);
+  const hasConfiguredExtraTarget = extraFromGoals > 0;
+  const extraMonthlyTarget = hasConfiguredExtraTarget ? extraFromGoals : 0;
+
+  const debtsWithoutMonthlyPayment = activeDebts
+    .filter((d) => (Number(d.monthlyPayment) || 0) <= 0)
+    .map((d) => d.title);
+
+  const debtsWithoutInterestRate = activeDebts
+    .filter((d) => (Number(d.interestRate) || 0) <= 0)
+    .map((d) => d.title);
+
+  const canCalculateExactPayoffTimeline =
+    activeDebts.length > 0 &&
+    totalRemainingAmount > 0 &&
+    totalMonthlyPayment > 0 &&
+    debtsWithoutMonthlyPayment.length === 0;
+
+  const standardPayoffMonths = canCalculateExactPayoffTimeline
+    ? Math.ceil(totalRemainingAmount / totalMonthlyPayment)
+    : null;
+
+  const acceleratedPayoffMonths =
+    canCalculateExactPayoffTimeline && hasConfiguredExtraTarget
+      ? Math.ceil(totalRemainingAmount / (totalMonthlyPayment + extraMonthlyTarget))
+      : null;
+
+  const monthsSavedWithExtra =
+    standardPayoffMonths !== null && acceleratedPayoffMonths !== null
+      ? Math.max(0, standardPayoffMonths - acceleratedPayoffMonths)
+      : null;
+
+  const missingDataForCompletePlan: string[] = [];
+  if (activeDebts.length === 0) {
+    missingDataForCompletePlan.push('Nenhuma dívida ativa cadastrada (valor, parcela e vencimento).');
+  } else {
+    if (debtsWithoutMonthlyPayment.length > 0) {
+      missingDataForCompletePlan.push(
+        `Valor da parcela mensal não informado para: ${debtsWithoutMonthlyPayment.join(', ')}.`
+      );
+    }
+    if (debtsWithoutInterestRate.length > 0) {
+      missingDataForCompletePlan.push(
+        `Taxa de juros mensal não informada para: ${debtsWithoutInterestRate.join(', ')}.`
+      );
+    }
+    if (!hasConfiguredIncome) {
+      missingDataForCompletePlan.push('Renda mensal líquida do usuário não informada no perfil.');
+    }
+    if (!hasConfiguredExtraTarget) {
+      missingDataForCompletePlan.push(
+        'Valor extra mensal disponível para antecipar parcelas (além das parcelas normais) ainda não informado.'
+      );
+    }
+  }
+
+  // Due date windows (next 7 and 30 days)
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const in7Days = new Date(today);
+  in7Days.setDate(today.getDate() + 7);
+  const in30Days = new Date(today);
+  in30Days.setDate(today.getDate() + 30);
+
+  const dueNext7Days = activeDebts.filter((d) => {
+    if (!d.dueDate) return false;
+    const parsed = new Date(`${d.dueDate}T00:00:00`);
+    if (isNaN(parsed.getTime())) return false;
+    return parsed >= today && parsed <= in7Days;
+  });
+
+  const dueNext30Days = activeDebts.filter((d) => {
+    if (!d.dueDate) return false;
+    const parsed = new Date(`${d.dueDate}T00:00:00`);
+    if (isNaN(parsed.getTime())) return false;
+    return parsed >= today && parsed <= in30Days;
+  });
+
+  // Category aggregation
+  const catMap = new Map<string, { count: number; remainingAmount: number; monthlyPayment: number }>();
+  for (const d of activeDebts) {
+    const cat = d.category || 'Outros';
+    const current = catMap.get(cat) || { count: 0, remainingAmount: 0, monthlyPayment: 0 };
+    current.count += 1;
+    current.remainingAmount += Number(d.remainingAmount) || 0;
+    current.monthlyPayment += Number(d.monthlyPayment) || 0;
+    catMap.set(cat, current);
+  }
+
+  const categories: CategoryBreakdownItem[] = Array.from(catMap.entries())
+    .map(([category, stats]) => ({
+      category,
+      count: stats.count,
+      remainingAmount: Math.round(stats.remainingAmount * 100) / 100,
+      monthlyPayment: Math.round(stats.monthlyPayment * 100) / 100,
+      sharePercent:
+        totalRemainingAmount > 0 ? Math.round((stats.remainingAmount / totalRemainingAmount) * 100) : 0,
+    }))
+    .sort((a, b) => b.remainingAmount - a.remainingAmount);
+
+  const toRankingItem = (d: DebtItem, idx: number): StrategyRankingItem => {
+    const rem = Number(d.remainingAmount) || 0;
+    const rate = Number(d.interestRate) || 0;
+    const totalInst = Math.max(1, Number(d.installmentsTotal) || 1);
+    const paidInst = Math.max(0, Number(d.installmentsPaid) || 0);
+    return {
+      position: idx + 1,
+      id: d.id,
+      title: d.title,
+      creditor: d.creditor,
+      category: d.category,
+      remainingAmount: rem,
+      monthlyPayment: Number(d.monthlyPayment) || 0,
+      interestRate: rate,
+      estimatedMonthlyInterestCost: Math.round(rem * (rate / 100) * 100) / 100,
+      dueDate: d.dueDate,
+      status: d.status,
+      installmentsRemaining: Math.max(0, totalInst - paidInst),
+    };
+  };
+
+  // Strategy 1: Avalanche (Highest interest rate first, tie-break by highest remaining balance)
+  const avalancheOrder = [...activeDebts]
+    .sort((a, b) => {
+      if (b.interestRate !== a.interestRate) return b.interestRate - a.interestRate;
+      return b.remainingAmount - a.remainingAmount;
+    })
+    .map(toRankingItem);
+
+  // Strategy 2: Bola de Neve / Snowball (Lowest remaining amount first, tie-break by highest interest rate)
+  const snowballOrder = [...activeDebts]
+    .sort((a, b) => {
+      if (a.remainingAmount !== b.remainingAmount) return a.remainingAmount - b.remainingAmount;
+      return b.interestRate - a.interestRate;
+    })
+    .map(toRankingItem);
+
+  // Strategy 3: Urgency / Vencimento (Overdue first, then earliest due date)
+  const statusWeight = (s: DebtItem['status']) => {
+    if (s === 'atrasado') return 0;
+    if (s === 'proximo_vencimento') return 1;
+    return 2;
+  };
+  const urgencyOrder = [...activeDebts]
+    .sort((a, b) => {
+      const wDiff = statusWeight(a.status) - statusWeight(b.status);
+      if (wDiff !== 0) return wDiff;
+      return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
+    })
+    .map(toRankingItem);
+
+  return {
+    hasActiveDebts: activeDebts.length > 0,
+    totalDebtsCount: safeDebts.length,
+    activeDebtsCount: activeDebts.length,
+    settledDebtsCount: settledDebts.length,
+    overdueCount: overdueDebts.length,
+    overdueAmount: Math.round(overdueAmount * 100) / 100,
+    upcomingDueCount: upcomingDueDebts.length,
+    upcomingDueAmount: Math.round(upcomingDueAmount * 100) / 100,
+    onTimeCount: onTimeDebts.length,
+    onTimeAmount: Math.round(onTimeAmount * 100) / 100,
+    totalOriginalAmount: Math.round(totalOriginalAmount * 100) / 100,
+    totalRemainingAmount: Math.round(totalRemainingAmount * 100) / 100,
+    totalAmortizedAmount: Math.round(totalAmortizedAmount * 100) / 100,
+    amortizedPercent,
+    totalMonthlyPayment: Math.round(totalMonthlyPayment * 100) / 100,
+    totalEstimatedMonthlyInterest: Math.round(totalEstimatedMonthlyInterest * 100) / 100,
+    totalInstallmentsContracted,
+    totalInstallmentsPaid,
+    totalInstallmentsRemaining,
+    monthlyIncome,
+    hasConfiguredIncome,
+    incomeCommitmentPercent,
+    extraMonthlyTarget,
+    hasConfiguredExtraTarget,
+    debtsWithoutMonthlyPayment,
+    debtsWithoutInterestRate,
+    canCalculateExactPayoffTimeline,
+    standardPayoffMonths,
+    acceleratedPayoffMonths,
+    monthsSavedWithExtra,
+    missingDataForCompletePlan,
+    dueNext7Days,
+    dueNext30Days,
+    categories,
+    avalancheOrder,
+    snowballOrder,
+    urgencyOrder,
+    activeGoalsCount: safeGoals.length,
+  };
+}
+
+/**
+ * Generates a real-time AI recommendation based strictly on the authenticated user's debts.
+ * Replaces static mock recommendations so no fictional data is ever displayed.
+ */
+export function buildDynamicAiRecommendation(
+  debts: DebtItem[],
+  profile?: UserProfile
+): { title: string; description: string; tag: string } {
+  const currency = profile?.currency || 'BRL';
+  const analysis = buildUserFinancialAnalysis(debts, [], profile);
+
+  if (!analysis.hasActiveDebts) {
+    if (analysis.settledDebtsCount > 0) {
+      return {
+        title: 'Parabéns! Todas as suas dívidas cadastradas estão quitadas',
+        description: `Você possui ${analysis.settledDebtsCount} contrato(s) quitado(s) e nenhum saldo devedor pendente. Use o Consultor IA para planejar seus próximos passos.`,
+        tag: 'Dívida Zero Conquistada',
+      };
+    }
+    return {
+      title: 'Comece organizando seus compromissos financeiros',
+      description:
+        'Cadastre suas dívidas ou importe um boleto para que o Consultor IA calcule prioridades e prazos reais de quitação sob medida para você.',
+      tag: 'Consultor IA Pronto',
+    };
+  }
+
+  if (analysis.overdueCount > 0) {
+    const topOverdue = analysis.urgencyOrder[0];
+    return {
+      title: `Prioridade Imediata: Regularizar ${analysis.overdueCount} conta(s) em atraso`,
+      description: `A dívida "${topOverdue.title}" (${topOverdue.creditor}) está em atraso com saldo de ${formatBRL(topOverdue.remainingAmount, currency)}. Regularizá-la primeiro evita novas multas.`,
+      tag: 'Alerta de Atraso',
+    };
+  }
+
+  const topAvalanche = analysis.avalancheOrder[0];
+  const topSnowball = analysis.snowballOrder[0];
+
+  if (topAvalanche && topAvalanche.interestRate > 0) {
+    return {
+      title: `Estratégia Avalanche: Priorizar ${topAvalanche.title} (${topAvalanche.interestRate}% a.m.)`,
+      description: `Este contrato com ${topAvalanche.creditor} tem a maior taxa de juros da sua carteira (cerca de ${formatBRL(topAvalanche.estimatedMonthlyInterestCost, currency)}/mês em juros). Quitar ele primeiro traz a maior economia.`,
+      tag: 'Economia de Juros',
+    };
+  }
+
+  return {
+    title: `Estratégia Bola de Neve: Eliminar ${topSnowball.title}`,
+    description: `Com saldo restante de ${formatBRL(topSnowball.remainingAmount, currency)}, quitar este contrato primeiro libera ${formatBRL(topSnowball.monthlyPayment, currency)}/mês no seu orçamento.`,
+    tag: 'Fluxo de Caixa',
+  };
+}
+
+/**
+ * Extracts an explicit extra monthly payment amount if the user mentioned one in the prompt.
+ */
+function extractExplicitAmountFromPrompt(prompt: string): number | null {
+  const match = prompt.match(/(?:r\$\s*)?(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)/i);
+  if (!match) return null;
+  const raw = match[1].replace(/\./g, '').replace(',', '.');
+  const val = parseFloat(raw);
+  return isNaN(val) || val <= 0 ? null : val;
+}
+
+/**
+ * Deterministic, zero-hallucination local financial advisor engine.
+ * Responds in simple, welcoming, objective Brazilian Portuguese.
+ * Only presents payoff values, priorities, and deadlines when calculable from real data;
+ * asks clarifying questions when information is missing before estimating.
+ */
+export function generateDeterministicAssistantReply(
+  prompt: string,
+  analysis: UserFinancialAnalysis,
+  debts: DebtItem[],
+  goals: GoalItem[] = [],
+  profile?: UserProfile
+): string {
+  const currency = profile?.currency || 'BRL';
+  const userName = (profile?.name || 'Usuário').split(' ')[0];
+  const q = (prompt || '').toLowerCase();
+  const explicitAmount = extractExplicitAmountFromPrompt(prompt);
+
+  if (!analysis.hasActiveDebts) {
+    if (analysis.settledDebtsCount > 0) {
+      return `Que ótima notícia, ${userName}! Todas as suas ${analysis.settledDebtsCount} dívida(s) cadastradas já constam como quitadas (saldo devedor atual: ${formatBRL(0, currency)}).\n\nSe você tiver algum novo compromisso financeiro ou quiser simular um planejamento, me conte: qual é o valor da conta, da parcela mensal e a data de vencimento?`;
+    }
+    return `Olá, ${userName}! Fico feliz em te ajudar a organizar sua vida financeira. No momento, você ainda não tem nenhuma dívida cadastrada na sua conta.\n\nPara eu montar seu plano de quitação com valores e prazos reais sem chutar nenhum número, você pode cadastrar suas contas no botão **"Nova Dívida"** ou me contar aqui:\n• Quais são as suas dívidas atuais e o valor restante de cada uma?\n• Qual é o valor da parcela mensal e a taxa de juros (se souber)?\n• Quanto você consegue separar por mês para os pagamentos?`;
+  }
+
+  // 1. Organizar dívidas / visão geral / categorias / prioridades
+  if (
+    q.includes('organizar') ||
+    q.includes('organize') ||
+    q.includes('resumo') ||
+    q.includes('categoria') ||
+    q.includes('classific') ||
+    q.includes('visão geral') ||
+    q.includes('visao geral')
+  ) {
+    const catLines = analysis.categories
+      .map(
+        (c) =>
+          `• **${c.category}**: ${c.count} conta(s) — Saldo de ${formatBRL(c.remainingAmount, currency)} (${c.sharePercent}% do total)`
+      )
+      .join('\n');
+
+    const urgencyLines = analysis.urgencyOrder
+      .slice(0, 5)
+      .map(
+        (d) =>
+          `${d.position}º **${d.title}** (${d.creditor}) — Saldo: ${formatBRL(d.remainingAmount, currency)} | Parcela: ${d.monthlyPayment > 0 ? formatBRL(d.monthlyPayment, currency) : 'não informada'} | Vencimento: ${d.dueDate} (${d.status === 'atrasado' ? 'Em atraso' : d.status === 'proximo_vencimento' ? 'Vence em breve' : 'Em dia'})`
+      )
+      .join('\n');
+
+    return [
+      `${userName}, organizei suas **${analysis.activeDebtsCount} dívida(s) ativa(s)** de forma simples para você visualizar onde está cada valor:`,
+      '',
+      `• **Total que falta pagar:** ${formatBRL(analysis.totalRemainingAmount, currency)} (você já quitou ${analysis.amortizedPercent}% do valor original)`,
+      `• **Soma das parcelas mensais:** ${formatBRL(analysis.totalMonthlyPayment, currency)}`,
+      `• **Situação dos prazos:** ${analysis.overdueCount} em atraso (${formatBRL(analysis.overdueAmount, currency)}), ${analysis.upcomingDueCount} vencendo em breve e ${analysis.onTimeCount} em dia.`,
+      '',
+      '📂 **Por Categoria:**',
+      catLines,
+      '',
+      '🎯 **Ordem de Atenção (da mais urgente para a menos urgente):**',
+      urgencyLines,
+    ].join('\n');
+  }
+
+  // 2. Plano de Quitação / Estratégias (Avalanche vs Bola de Neve) / Prazos
+  if (
+    q.includes('plano') ||
+    q.includes('planejar') ||
+    q.includes('quitação') ||
+    q.includes('quitacao') ||
+    q.includes('estratégia') ||
+    q.includes('estrategia') ||
+    q.includes('avalanche') ||
+    q.includes('bola de neve') ||
+    q.includes('snowball') ||
+    q.includes('quitar') ||
+    q.includes('prazo')
+  ) {
+    const topAv = analysis.avalancheOrder[0];
+    const topSn = analysis.snowballOrder[0];
+
+    const prioritySection: string[] = [
+      `Aqui está o seu diagnóstico de quitação baseado apenas nos dados que você já cadastrou, ${userName}:`,
+      '',
+      `💰 **Valores Atuais Confirmados:**`,
+      `• Saldo devedor total: **${formatBRL(analysis.totalRemainingAmount, currency)}** (${analysis.activeDebtsCount} dívida(s) ativa(s))`,
+      `• Compromisso mensal atual com parcelas: **${formatBRL(analysis.totalMonthlyPayment, currency)}/mês**`,
+    ];
+
+    if (analysis.overdueCount > 0) {
+      prioritySection.push(
+        `• **Prioridade nº 1 (Urgente):** Regularizar primeiro a(s) ${analysis.overdueCount} conta(s) em atraso (${debts
+          .filter((d) => d.status === 'atrasado')
+          .map((d) => `${d.title} — ${formatBRL(d.remainingAmount, currency)}`)
+          .join(', ')}) para interromper multas.`
+      );
+    }
+
+    prioritySection.push('');
+    prioritySection.push('🧭 **Como escolher sua ordem de quitação:**');
+
+    if (analysis.debtsWithoutInterestRate.length === activeDebtsCountOrZero(analysis)) {
+      prioritySection.push(
+        `• **Método Avalanche (Maior juros primeiro):** Notei que você ainda não informou a taxa de juros mensal das suas dívidas. Sem essa informação, ainda não consigo calcular qual contrato cobra mais juros.`
+      );
+    } else {
+      prioritySection.push(
+        `• **Método Avalanche (Economizar juros):** Comece amortizando **${topAv.title}** (${topAv.creditor}), que tem a maior taxa de juros cadastrada (**${topAv.interestRate}% ao mês**, custando cerca de ${formatBRL(topAv.estimatedMonthlyInterestCost, currency)}/mês em juros).`
+      );
+    }
+
+    prioritySection.push(
+      `• **Método Bola de Neve (Liberar fôlego rápido):** Comece quitando **${topSn.title}** (${topSn.creditor}), que tem o menor saldo restante (**${formatBRL(topSn.remainingAmount, currency)}**). Ao eliminar essa conta, você libera **${formatBRL(topSn.monthlyPayment, currency)}/mês** para usar na próxima dívida.`
+    );
+
+    // Check if we can calculate timelines or if we need to ask questions first
+    const extraAvailable =
+      explicitAmount && (q.includes('extra') || q.includes('mais') || q.includes('aport') || q.includes('r$'))
+        ? explicitAmount
+        : analysis.hasConfiguredExtraTarget
+        ? analysis.extraMonthlyTarget
+        : null;
+
+    prioritySection.push('');
+    prioritySection.push('⏳ **Prazos Calculados:**');
+
+    if (analysis.canCalculateExactPayoffTimeline && analysis.standardPayoffMonths !== null) {
+      prioritySection.push(
+        `• Mantendo o pagamento das parcelas atuais (${formatBRL(analysis.totalMonthlyPayment, currency)}/mês), o prazo calculado para quitar o saldo atual é de **${analysis.standardPayoffMonths} meses**.`
+      );
+      if (extraAvailable && extraAvailable > 0) {
+        const accelMonths = Math.ceil(
+          analysis.totalRemainingAmount / (analysis.totalMonthlyPayment + extraAvailable)
+        );
+        const saved = Math.max(0, analysis.standardPayoffMonths - accelMonths);
+        prioritySection.push(
+          `• Com o valor extra de **${formatBRL(extraAvailable, currency)}/mês** (totalizando ${formatBRL(analysis.totalMonthlyPayment + extraAvailable, currency)}/mês), seu prazo estimado cai para **${accelMonths} meses** (economia de **${saved} meses**).`
+        );
+      }
+    } else {
+      prioritySection.push(
+        `• Ainda não calculei o prazo final em meses porque falta o valor da parcela mensal em: **${analysis.debtsWithoutMonthlyPayment.join(', ')}**.`
+      );
+    }
+
+    // Ask welcoming questions if any data is missing to complete/refine the plan
+    const questionsToAsk: string[] = [];
+    if (analysis.debtsWithoutMonthlyPayment.length > 0) {
+      questionsToAsk.push(
+        `Qual é o valor da parcela mensal que você paga em **${analysis.debtsWithoutMonthlyPayment.join(', ')}**?`
+      );
+    }
+    if (analysis.debtsWithoutInterestRate.length > 0) {
+      questionsToAsk.push(
+        `Você sabe a taxa de juros mensal de **${analysis.debtsWithoutInterestRate.join(', ')}** para eu calcular a economia exata no método Avalanche?`
+      );
+    }
+    if (!analysis.hasConfiguredIncome) {
+      questionsToAsk.push(
+        `Qual é a sua renda mensal aproximada hoje? (Assim consigo verificar se as parcelas de ${formatBRL(analysis.totalMonthlyPayment, currency)} cabem com folga no seu orçamento).`
+      );
+    }
+    if (!extraAvailable) {
+      questionsToAsk.push(
+        `Além das parcelas normais de ${formatBRL(analysis.totalMonthlyPayment, currency)}/mês, você conseguiria separar algum valor extra por mês para adiantar a quitação? Se sim, quanto?`
+      );
+    }
+
+    if (questionsToAsk.length > 0) {
+      prioritySection.push('');
+      prioritySection.push(
+        '💬 **Para eu ajustar esse plano exatamente para a sua realidade sem chutar nenhum valor, me conta:**'
+      );
+      for (const question of questionsToAsk) {
+        prioritySection.push(`• ${question}`);
+      }
+    }
+
+    return prioritySection.join('\n');
+  }
+
+  // 3. Análise de Parcelas / impacto de nova parcela
+  if (
+    q.includes('parcela') ||
+    q.includes('adicionar') ||
+    q.includes('prestação') ||
+    q.includes('prestacao') ||
+    q.includes('comprometimento')
+  ) {
+    const hasExplicitNewInstallment =
+      q.includes('adicionar') || q.includes('nova parcela') || q.includes('novo parcelamento');
+
+    if (hasExplicitNewInstallment) {
+      if (!explicitAmount) {
+        return `${userName}, hoje suas parcelas somam **${formatBRL(analysis.totalMonthlyPayment, currency)} por mês**.\n\nPara eu calcular exatamente como ficará seu orçamento sem estimar no escuro, me diz: **qual seria o valor mensal dessa nova parcela e por quantos meses?**`;
+      }
+      const newTotal = analysis.totalMonthlyPayment + explicitAmount;
+      const newIncomeShare = analysis.hasConfiguredIncome
+        ? ` (o que representará **${Math.round((newTotal / analysis.monthlyIncome) * 1000) / 10}%** da sua renda mensal de ${formatBRL(analysis.monthlyIncome, currency)})`
+        : '';
+      const incomeQuestion = !analysis.hasConfiguredIncome
+        ? `\n\n💬 *Dica: Se quiser que eu avalie se esse valor fica pesado no seu bolso, me conte qual é a sua renda mensal atual.*`
+        : '';
+
+      return `📈 **Simulação com a Nova Parcela:**\n• Suas parcelas atuais: ${formatBRL(analysis.totalMonthlyPayment, currency)}/mês\n• Nova parcela informada: + ${formatBRL(explicitAmount, currency)}/mês\n• **Novo total mensal:** **${formatBRL(newTotal, currency)}/mês**${newIncomeShare}.\n\n${analysis.overdueCount > 0 ? '⚠️ Como você tem conta(s) em atraso no momento, o mais seguro é regularizá-las antes de assumir uma nova parcela.' : 'Avalie se esse novo total mensal mantém uma reserva tranquila para suas despesas do dia a dia.'}${incomeQuestion}`;
+    }
+
+    const debtInstallmentsList = debts
+      .filter((d) => d.status !== 'quitado')
+      .map((d) => {
+        const remInst = Math.max(0, (Number(d.installmentsTotal) || 1) - (Number(d.installmentsPaid) || 0));
+        return `• **${d.title}**: ${d.installmentsPaid} de ${d.installmentsTotal} pagas (faltam **${remInst}** parcelas de ${formatBRL(d.monthlyPayment, currency)})`;
+      })
+      .join('\n');
+
+    const incomeLine =
+      analysis.incomeCommitmentPercent !== null
+        ? `\n• **Peso na sua renda (${formatBRL(analysis.monthlyIncome, currency)}):** **${analysis.incomeCommitmentPercent}%** ${analysis.incomeCommitmentPercent > 30 ? '(acima dos 30% recomendados — merece atenção)' : '(dentro do limite saudável de até 30%)'}`
+        : `\n• *Observação: Sua renda mensal ainda não foi informada no perfil. Se quiser me dizer quanto recebe por mês, calculo quantos % da sua renda estão comprometidos.*`;
+
+    return [
+      `📑 **Análise das suas Parcelas Atuais, ${userName}:**`,
+      `• **Total mensal das parcelas:** ${formatBRL(analysis.totalMonthlyPayment, currency)}/mês${incomeLine}`,
+      `• **Andamento geral:** Você já pagou **${analysis.totalInstallmentsPaid}** de ${analysis.totalInstallmentsContracted} parcelas (restam **${analysis.totalInstallmentsRemaining} parcelas** ao todo).`,
+      '',
+      '📋 **Detalhamento por dívida:**',
+      debtInstallmentsList,
+    ].join('\n');
+  }
+
+  // 4. Vencimentos próximos / mês atual / atrasadas
+  if (
+    q.includes('mês') ||
+    q.includes('mes') ||
+    q.includes('7 dias') ||
+    q.includes('vencem') ||
+    q.includes('vencimento') ||
+    q.includes('atrasada') ||
+    q.includes('atraso')
+  ) {
+    if (q.includes('atrasada') || q.includes('atraso')) {
+      const overdue = debts.filter((d) => d.status === 'atrasado');
+      if (overdue.length === 0) {
+        return `Que tranquilidade, ${userName}! Você **não tem nenhuma conta atrasada** no momento. Todas as suas ${analysis.activeDebtsCount} dívida(s) ativa(s) estão em dia.`;
+      }
+      const list = overdue
+        .map(
+          (d) =>
+            `• **${d.title}** (${d.creditor}) — Saldo: ${formatBRL(d.remainingAmount, currency)} | Parcela: ${formatBRL(d.monthlyPayment, currency)} | Venceu em: ${d.dueDate}`
+        )
+        .join('\n');
+      return `No momento você tem **${overdue.length} conta(s) em atraso**, somando **${formatBRL(analysis.overdueAmount, currency)}** de saldo:\n\n${list}\n\nMinha sugestão é dar prioridade a elas primeiro para evitar novos juros e multas. Você gostaria de planejar como regularizar essas contas este mês?`;
+    }
+
+    const next7Text =
+      analysis.dueNext7Days.length > 0
+        ? `Nos próximos 7 dias vencem **${analysis.dueNext7Days.length} conta(s)**:\n` +
+          analysis.dueNext7Days
+            .map((d) => `• **${d.title}** (${d.creditor}) em ${d.dueDate} — Parcela: **${formatBRL(d.monthlyPayment, currency)}**`)
+            .join('\n')
+        : 'Você **não tem nenhuma conta vencendo nos próximos 7 dias**.';
+
+    return [
+      `🗓️ **Resumo dos seus Pagamentos deste Mês, ${userName}:**`,
+      `• **Total das parcelas do mês:** ${formatBRL(analysis.totalMonthlyPayment, currency)}`,
+      `• **Contas em atraso:** ${analysis.overdueCount > 0 ? `${analysis.overdueCount} conta(s) (${formatBRL(analysis.overdueAmount, currency)})` : 'Nenhuma'}`,
+      '',
+      next7Text,
+    ].join('\n');
+  }
+
+  // 5. Pergunta sobre total devido
+  if (q.includes('total') || q.includes('quanto ainda devo') || q.includes('saldo devedor')) {
+    return `💰 **Seu Saldo Devedor Atual, ${userName}:**\n• **Total que falta pagar:** ${formatBRL(analysis.totalRemainingAmount, currency)} (em ${analysis.activeDebtsCount} dívida(s) ativa(s))\n• **Valor que você já quitou:** ${formatBRL(analysis.totalAmortizedAmount, currency)} (${analysis.amortizedPercent}% do total inicial)\n• **Soma das parcelas mensais:** ${formatBRL(analysis.totalMonthlyPayment, currency)}/mês`;
+  }
+
+  // Resposta padrão acolhedora e objetiva
+  const topAvalanche = analysis.avalancheOrder[0];
+  const topSnowball = analysis.snowballOrder[0];
+  return [
+    `Olá, ${userName}! Olhando para os seus dados reais hoje (${analysis.activeDebtsCount} dívida(s) ativa(s)):`,
+    `• **Saldo restante total:** ${formatBRL(analysis.totalRemainingAmount, currency)}`,
+    `• **Soma das parcelas no mês:** ${formatBRL(analysis.totalMonthlyPayment, currency)}`,
+    `• **Maior juros (Avalanche):** ${topAvalanche.title} (${topAvalanche.interestRate}% a.m.)`,
+    `• **Menor saldo (Bola de Neve):** ${topSnowball.title} (${formatBRL(topSnowball.remainingAmount, currency)})`,
+    '',
+    'Se quiser que eu monte um plano completo de quitação com prazos para o seu bolso, me diga quanto você consegue destinar por mês para pagar suas dívidas!',
+  ].join('\n');
+}
+
+function activeDebtsCountOrZero(analysis: UserFinancialAnalysis): number {
+  return analysis.activeDebtsCount || 0;
+}
+
+/**
+ * Consults the Gemini Financial Assistant using the authenticated user's isolated data.
+ * Reuses the Supabase session verification and `/api/ai-chat` Gemini backend endpoint,
+ * with automatic fallback to the deterministic calculation engine.
+ */
+export async function askFinancialAssistant(
+  params: AskFinancialAssistantParams
+): Promise<AskFinancialAssistantResult> {
+  const { prompt, userId, debts, goals = [], profile, history = [] } = params;
+
+  // 1. Verify authenticated user session if Supabase is active (strict user isolation)
+  let verifiedUser: User | null = null;
+  let accessToken: string | null = null;
+  if (supabase && isSupabaseConfigured()) {
+    verifiedUser = await getVerifiedSessionUser(userId);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.access_token && (!userId || session.user?.id === userId)) {
+        accessToken = session.access_token;
+      }
+    } catch {
+      // Ignore session read error
+    }
+  }
+
+  // 2. Ensure goals include the authenticated user's saved goals if not explicitly passed
+  let effectiveGoals = Array.isArray(goals) && goals.length > 0 ? goals : [];
+  const effectiveUserId = verifiedUser?.id || userId;
+  if (effectiveGoals.length === 0 && typeof localStorage !== 'undefined' && effectiveUserId) {
+    try {
+      const rawGoals = localStorage.getItem(`divida_zero_goals_${effectiveUserId}`);
+      if (rawGoals) {
+        const parsed = JSON.parse(rawGoals);
+        if (Array.isArray(parsed)) effectiveGoals = parsed;
+      }
+    } catch {
+      // Ignore parse error
+    }
+  }
+
+  // 3. Compute deterministic analysis strictly from the user's own data
+  const analysis = buildUserFinancialAnalysis(debts, effectiveGoals, profile);
+
+  // 4. Respect user's privacy setting allowAiDataAnalysis
+  if (profile && profile.allowAiDataAnalysis === false) {
+    const localReply = generateDeterministicAssistantReply(
+      prompt,
+      analysis,
+      debts,
+      effectiveGoals,
+      profile
+    );
+    return {
+      reply: `${localReply}\n\n🔒 *Nota de Privacidade: A análise externa por IA está desativada nas preferências do seu perfil. Esta resposta foi gerada 100% localmente no seu dispositivo.*`,
+      source: 'privacy_restricted',
+      analysis,
+    };
+  }
+
+  // 5. Call the server-side Gemini endpoint (/api/ai-chat) with the user's isolated financial context
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 14000);
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (accessToken) {
+      headers['Authorization'] = `Bearer ${accessToken}`;
+    }
+
+    const res = await fetch('/api/ai-chat', {
+      method: 'POST',
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        prompt: prompt.trim(),
+        userId: effectiveUserId || 'authenticated-user',
+        debtsContext: debts,
+        goalsContext: effectiveGoals,
+        profileContext: profile
+          ? {
+              name: profile.name,
+              currency: profile.currency,
+              monthlyIncome: profile.monthlyIncome || 0,
+              occupation: profile.occupation || '',
+              financialBio: profile.financialBio || '',
+            }
+          : undefined,
+        analysisContext: {
+          activeDebtsCount: analysis.activeDebtsCount,
+          settledDebtsCount: analysis.settledDebtsCount,
+          overdueCount: analysis.overdueCount,
+          overdueAmount: analysis.overdueAmount,
+          totalRemainingAmount: analysis.totalRemainingAmount,
+          totalAmortizedAmount: analysis.totalAmortizedAmount,
+          amortizedPercent: analysis.amortizedPercent,
+          totalMonthlyPayment: analysis.totalMonthlyPayment,
+          totalEstimatedMonthlyInterest: analysis.totalEstimatedMonthlyInterest,
+          totalInstallmentsContracted: analysis.totalInstallmentsContracted,
+          totalInstallmentsPaid: analysis.totalInstallmentsPaid,
+          totalInstallmentsRemaining: analysis.totalInstallmentsRemaining,
+          hasConfiguredIncome: analysis.hasConfiguredIncome,
+          incomeCommitmentPercent: analysis.incomeCommitmentPercent,
+          hasConfiguredExtraTarget: analysis.hasConfiguredExtraTarget,
+          extraMonthlyTarget: analysis.extraMonthlyTarget,
+          canCalculateExactPayoffTimeline: analysis.canCalculateExactPayoffTimeline,
+          standardPayoffMonths: analysis.standardPayoffMonths,
+          acceleratedPayoffMonths: analysis.acceleratedPayoffMonths,
+          monthsSavedWithExtra: analysis.monthsSavedWithExtra,
+          debtsWithoutMonthlyPayment: analysis.debtsWithoutMonthlyPayment,
+          debtsWithoutInterestRate: analysis.debtsWithoutInterestRate,
+          missingDataForCompletePlan: analysis.missingDataForCompletePlan,
+          avalancheTop: analysis.avalancheOrder[0] || null,
+          snowballTop: analysis.snowballOrder[0] || null,
+          categories: analysis.categories,
+        },
+        history: history.slice(-8),
+      }),
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    if (data?.reply && typeof data.reply === 'string' && data.reply.trim()) {
+      return {
+        reply: data.reply.trim(),
+        source: 'gemini',
+        analysis,
+      };
+    }
+    throw new Error('Empty AI reply');
+  } catch {
+    // 6. Fallback to deterministic local advisor engine using 100% real user data
+    const fallbackReply = generateDeterministicAssistantReply(
+      prompt,
+      analysis,
+      debts,
+      effectiveGoals,
+      profile
+    );
+    return {
+      reply: fallbackReply,
+      source: 'local_engine',
+      analysis,
+    };
+  }
+}
+
 
